@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Jet Lag: Sydney Edition — Transit Game Companion</title>
+  <meta name="description" content="Real-world Sydney transit map, challenge randomizer wheel, multi-mode Jet Lag game engine (Hide+Seek, Tag, Rail Rush, Capture the Flag, Race, Custom), and live multiplayer sync." />
+  <meta name="theme-color" content="#080d1a" />
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="icon" type="image/svg+xml" href="./assets/icon.svg" />
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@600;700;800&family=Space+Grotesk:wght@600;700;800&display=swap" rel="stylesheet" />
+
+  <!-- Leaflet 1.9.4 -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+
+  <!-- PeerJS (Zero-Setup WebRTC Rooms) & QR Generator -->
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js" crossorigin=""></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js" crossorigin=""></script>
+
+  <link rel="stylesheet" href="./css/styles.css" />
+</head>
+<body>
+  <!-- TOP BROADCAST BAR -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-logo">JL</div>
+      <div>
+        <div class="brand-title">Jet Lag: Sydney</div>
+        <div class="brand-sub" id="network-meta-sub">390+ Real Stops • 29 Lines</div>
+      </div>
+    </div>
+
+    <div class="topbar-center">
+      <button class="mode-chip" id="topbar-mode-btn" title="Switch Game Mode">
+        <span class="mode-dot" id="topbar-mode-dot"></span>
+        <span id="topbar-mode-label">Hide + Seek</span>
+      </button>
+      <button class="clock-pill" id="topbar-clock-btn" title="Click to Start / Pause Game Clock">
+        <span id="topbar-clock-ico">⏱️</span>
+        <span id="topbar-clock-text">00:00</span>
+      </button>
+    </div>
+
+    <div class="topbar-actions">
+      <button class="room-status-btn" id="topbar-room-btn" title="Live Multiplayer & Sharing">
+        <span class="status-led"></span>
+        <span id="topbar-room-label">Solo</span>
+      </button>
+      <button class="btn btn-ghost btn-xs" id="btn-sound-toggle" title="Toggle Wheel Sound">🔊</button>
+      <button class="btn btn-ghost btn-xs" id="btn-theme-toggle" title="Toggle Outdoor Light / Dark Mode">☀️</button>
+    </div>
+  </header>
+
+  <!-- MAIN APP WORKSPACE -->
+  <main class="app-shell">
+    <!-- INTERACTIVE REAL-WORLD SYDNEY MAP STAGE -->
+    <section class="map-stage" aria-label="Interactive Sydney Transit Map">
+      <div id="sydney-map"></div>
+
+      <!-- Floating Station Search -->
+      <div class="map-search-bar">
+        <div class="search-input-wrap">
+          <span>🔍</span>
+          <input type="text" id="station-search-input" placeholder="Search 380+ stations, wharves, lines…" autocomplete="off" />
+          <button class="btn btn-ghost btn-xs" id="station-search-clear" style="display:none">✕</button>
+        </div>
+        <div class="search-results" id="station-search-results"></div>
+      </div>
+
+      <!-- Floating Map Strategy Tools & Basemap Switcher -->
+      <div class="map-tools-bar">
+        <div class="tool-strip" role="toolbar" aria-label="Map Strategy Tools">
+          <button class="tool-btn active" data-map-tool="select" title="Inspect stations & routes">👆</button>
+          <button class="tool-btn" data-map-tool="radar" title="Draw Radar Hit/Miss Circle">📡 Radar</button>
+          <button class="tool-btn" data-map-tool="thermometer" title="Draw Thermometer Perpendicular Bisector">🌡️ Thermo</button>
+          <button class="tool-btn" data-map-tool="ruler" title="Measure real-world distance & walk/transit ETA">📏</button>
+          <button class="tool-btn" data-map-tool="polygon" title="Shade custom eliminated polygon zone">🗺️</button>
+          <button class="tool-btn" data-map-tool="pin" title="Drop custom tactical pin">📍</button>
+          <button class="tool-btn" id="btn-undo-ann" title="Undo last map overlay">↩️</button>
+          <button class="tool-btn" id="btn-clear-ann" title="Clear all strategy overlays">🗑️</button>
+        </div>
+
+        <div class="tool-strip">
+          <button class="tool-btn" id="btn-locate-me" title="Center on My GPS">🎯 GPS</button>
+          <button class="tool-btn" id="btn-fit-sydney" title="Fit Greater Sydney">🏙️ SYD</button>
+          <button class="tool-btn" id="btn-fit-nsw" title="Fit Full Intercity NSW Network">🗺️ NSW</button>
+          <button class="tool-btn" id="btn-toggle-labels" title="Toggle Permanent Station Labels">🏷️</button>
+          <select id="basemap-select" class="select" style="width:auto;padding:4px 7px;font-size:11.5px;border:none;background:transparent" title="Change Base Map">
+            <option value="dark">Dark Street</option>
+            <option value="minimal_dark">Minimal Dark</option>
+            <option value="osm">Day Street</option>
+            <option value="light">Outdoor Light</option>
+            <option value="satellite">Satellite</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Active Drawing Tool Banner -->
+      <div class="tool-banner" id="map-tool-banner">
+        <span id="map-tool-hint">Tap the map…</span>
+        <button class="btn btn-primary btn-xs" id="btn-tool-gps" style="display:none">At My GPS</button>
+        <button class="btn btn-accent btn-xs" id="btn-tool-finish" style="display:none">Finish</button>
+        <button class="btn btn-ghost btn-xs" id="btn-tool-cancel">Cancel</button>
+      </div>
+
+      <!-- Floating Transit Mode Layer Chips -->
+      <div class="map-filter-dock" id="map-mode-filters">
+        <button class="filter-chip on" data-transit-mode="train" style="--chip-col:#F99D1C"><span class="dot"></span>Trains</button>
+        <button class="filter-chip on" data-transit-mode="metro" style="--chip-col:#168388"><span class="dot"></span>Metro</button>
+        <button class="filter-chip on" data-transit-mode="light_rail" style="--chip-col:#BE1622"><span class="dot"></span>Light Rail</button>
+        <button class="filter-chip on" data-transit-mode="ferry" style="--chip-col:#5AB031"><span class="dot"></span>Ferries</button>
+        <button class="filter-chip on" data-transit-mode="intercity" style="--chip-col:#005AA3"><span class="dot"></span>Intercity</button>
+      </div>
+    </section>
+
+    <!-- SIDE COMMAND DRAWER (Desktop Docked / Mobile Bottom Sheet) -->
+    <aside class="side-panel" id="side-panel">
+      <div class="mobile-drawer-handle">
+        <strong id="mobile-drawer-title" style="font-family:var(--font-display)">Game Control</strong>
+        <button class="btn btn-ghost btn-xs" id="btn-close-mobile-drawer">▼ Map</button>
+      </div>
+
+      <nav class="panel-tabs" role="tablist">
+        <button class="tab-btn active" data-tab="game"><span class="tab-ico">🎮</span>Game</button>
+        <button class="tab-btn" data-tab="wheel"><span class="tab-ico">🎡</span>Wheel</button>
+        <button class="tab-btn" data-tab="shop"><span class="tab-ico">🪙</span>Shop</button>
+        <button class="tab-btn" data-tab="feed"><span class="tab-ico">💬</span>Feed</button>
+        <button class="tab-btn" data-tab="live"><span class="tab-ico">📡</span>Live</button>
+      </nav>
+
+      <div class="panel-body">
+        <!-- TAB 1: GAME MODES, TEAMS & MODE COMMAND PANELS -->
+        <div class="tab-pane active" id="pane-game"></div>
+
+        <!-- TAB 2: CHALLENGE WHEEL, ACTIVE CARD, CURSES & DECK BUILDER -->
+        <div class="tab-pane" id="pane-wheel">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">🎡 Randomizer Wheel</div>
+              <div class="row">
+                <button class="btn btn-xs btn-primary" id="wheel-type-challenges">Challenges</button>
+                <button class="btn btn-xs btn-ghost" id="wheel-type-curses">Curses</button>
+              </div>
+            </div>
+            <div class="row" id="wheel-filter-row"></div>
+            <div class="wheel-stage">
+              <div class="wheel-wrap">
+                <canvas id="challenge-wheel-canvas" width="340" height="340"></canvas>
+              </div>
+              <div class="row" style="width:100%">
+                <button class="btn btn-primary" id="btn-spin-wheel" style="flex:1">🎲 SPIN THE WHEEL</button>
+                <button class="btn btn-secondary" id="btn-shuffle-wheel" title="Load a fresh random sample of active cards onto the wheel">🔀 Shuffle</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="wheel-landed-slot"></div>
+          <div id="active-challenge-slot"></div>
+          <div id="active-curses-slot"></div>
+          <div id="deck-builder-slot"></div>
+        </div>
+
+        <!-- TAB 3: ECONOMY, POWERUPS & FULL SYDNEY LINE EXPLORER -->
+        <div class="tab-pane" id="pane-shop"></div>
+
+        <!-- TAB 4: LIVE ACTIVITY FEED, PHOTO PROOF & CHAT -->
+        <div class="tab-pane" id="pane-feed"></div>
+
+        <!-- TAB 5: MULTIPLAYER LIVE ROOMS, GPS & SYNC SETTINGS -->
+        <div class="tab-pane" id="pane-live"></div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- MOBILE BOTTOM NAVIGATION -->
+  <nav class="mobile-nav" aria-label="Mobile Navigation">
+    <button class="active" data-mobile-tab="map"><span class="ico">🗺️</span>Map</button>
+    <button data-mobile-tab="game"><span class="ico">🎮</span>Game</button>
+    <button data-mobile-tab="wheel"><span class="ico">🎡</span>Wheel</button>
+    <button data-mobile-tab="shop"><span class="ico">🪙</span>Shop</button>
+    <button data-mobile-tab="feed"><span class="ico">💬</span>Feed</button>
+    <button data-mobile-tab="live"><span class="ico">📡</span>Live</button>
+  </nav>
+
+  <!-- REUSABLE MODAL DIALOG -->
+  <div class="modal-backdrop" id="app-modal">
+    <div class="modal-box" id="app-modal-box"></div>
+  </div>
+
+  <!-- TOAST NOTIFICATIONS -->
+  <div class="toast-stack" id="toast-stack"></div>
+
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>
