@@ -1,8 +1,30 @@
-// Real-Time Multiplayer Sync (Zero-Setup PeerJS WebRTC + BroadcastChannel + Optional Firebase RTDB SSE) & Live GPS
-import { store } from './state.js';
+// Reliable Real-Time Multiplayer Sync:
+// Engine 1: Zero-Setup Cloud WSS Relay (MQTT over Secure WebSockets w/ Retained Room State + Failover + BroadcastChannel)
+// Engine 2: Optional Private Firebase Realtime Database (REST + SSE)
+import { store } from './state.js?v=9';
 
-function cleanCode(code) {
-  return (code || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10);
+const MQTT_BROKERS = [
+  { name: 'EMQX Cloud', url: 'wss://broker.emqx.io:8084/mqtt' },
+  { name: 'HiveMQ Cloud', url: 'wss://broker.hivemq.com:8884/mqtt' }
+];
+
+const TOPIC_PREFIX = 'jetlag-sydney/live/v2';
+
+/** Normalize any user input ("4k9p", "syd 4k9p", "SYD-4K9P", "MYGAME") into one consistent canonical code */
+export function normalizeRoomCode(raw) {
+  const alnum = (raw || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!alnum) return '';
+  if (alnum.startsWith('SYD') && alnum.length > 3) {
+    return `SYD-${alnum.slice(3, 9)}`;
+  }
+  if (alnum.length <= 5) {
+    return `SYD-${alnum}`;
+  }
+  return alnum.slice(0, 10);
+}
+
+function topicKey(code) {
+  return normalizeRoomCode(code).replace(/[^A-Z0-9]/g, '');
 }
 
 export function generateRoomCode() {
@@ -12,7 +34,7 @@ export function generateRoomCode() {
   return `SYD-${suffix}`;
 }
 
-/** Compress a phone camera image to a compact JPEG data URL (~30KB) for instant P2P/Firebase sync */
+/** Compress a phone camera image to a compact JPEG data URL (~30KB) for instant room sync */
 export function compressImageFile(file, maxDim = 560, quality = 0.68) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -43,21 +65,29 @@ export function compressImageFile(file, maxDim = 560, quality = 0.68) {
 export class MultiplayerManager {
   constructor(callbacks = {}) {
     this.callbacks = callbacks;
-    this.peer = null;
-    this.hostConn = null; // when guest
-    this.guestConns = new Map(); // when host: peerId -> DataConnection
-    this.bc = null; // same-browser tab BroadcastChannel
-    this.firebaseES = null; // EventSource for Firebase RTDB
+    this.mqttClient = null;
+    this.brokerIdx = 0;
+    this.bc = null; // instant same-browser multi-tab sync
+    this.firebaseES = null;
     this.geoWatchId = null;
-    this.lastBroadcastAt = 0;
-    this.pendingSyncTimer = null;
-    this.reconnectTimer = null;
 
-    // Subscribe to local store changes and propagate when connected
+    // Separate timers so GPS ticks NEVER cancel a pending game-state broadcast!
+    this.stateSyncTimer = null;
+    this.playerSyncTimer = null;
+    this.heartbeatTimer = null;
+    this.connectTimeoutTimer = null;
+    this.lastAppliedStateTs = 0;
+    this.activeTopicBase = '';
+
     store.subscribe((state, reason, shouldSync) => {
       if (!shouldSync) return;
       if (!state.room.connected) return;
-      this.scheduleBroadcast(reason);
+      if (reason === 'gps') {
+        this.schedulePlayerSync();
+      } else {
+        this.scheduleStateSync();
+        if (reason === 'profile' || reason === 'teams') this.schedulePlayerSync();
+      }
     });
   }
 
@@ -65,22 +95,24 @@ export class MultiplayerManager {
     const s = store.get();
     const url = new URL(window.location.href);
     url.search = '';
-    if (s.room.code) url.searchParams.set('room', s.room.code);
+    if (s.room.code) url.searchParams.set('room', normalizeRoomCode(s.room.code));
     if (s.room.engine === 'firebase' && s.room.firebaseUrl) {
       url.searchParams.set('fb', s.room.firebaseUrl);
     }
     return url.toString();
   }
 
-  disconnect() {
-    clearTimeout(this.pendingSyncTimer);
-    clearTimeout(this.reconnectTimer);
-    if (this.peer) {
-      try { this.peer.destroy(); } catch {}
-      this.peer = null;
+  disconnect(silent = false) {
+    clearTimeout(this.stateSyncTimer);
+    clearTimeout(this.playerSyncTimer);
+    clearInterval(this.heartbeatTimer);
+    clearTimeout(this.connectTimeoutTimer);
+    this.activeTopicBase = '';
+
+    if (this.mqttClient) {
+      try { this.mqttClient.end(true); } catch {}
+      this.mqttClient = null;
     }
-    this.hostConn = null;
-    this.guestConns.clear();
     if (this.bc) {
       try { this.bc.close(); } catch {}
       this.bc = null;
@@ -89,220 +121,278 @@ export class MultiplayerManager {
       try { this.firebaseES.close(); } catch {}
       this.firebaseES = null;
     }
-    store.mutate((s) => {
-      s.room.connected = false;
-      s.room.isHost = false;
-      s.room.statusText = 'Solo / Local Mode';
-    }, 'room_status', false);
+
+    if (!silent) {
+      store.mutate((s) => {
+        s.room.connected = false;
+        s.room.isHost = false;
+        s.room.statusText = 'Solo / Local Mode';
+      }, 'room_status', false);
+    }
   }
 
-  // ===== ENGINE 1: ZERO-SETUP PEERJS + BROADCASTCHANNEL =====
+  // ===== ENGINE 1: ZERO-SETUP CLOUD WSS RELAY (MQTT) + BROADCASTCHANNEL =====
   hostPeerRoom(rawCode) {
-    this.disconnect();
-    const code = rawCode ? rawCode.toUpperCase().trim() : generateRoomCode();
-    const peerId = `jetlag-syd-room-${cleanCode(code)}`;
-
-    store.mutate((s) => {
-      s.room.engine = 'peerjs';
-      s.room.code = code;
-      s.room.isHost = true;
-      s.room.connected = false;
-      s.room.statusText = `Opening room ${code}…`;
-    }, 'room_status', false);
-
-    this.setupBroadcastChannel(code, true);
-
-    if (!window.Peer) {
-      store.mutate((s) => {
-        s.room.connected = true;
-        s.room.statusText = `Local Tabs Room ${code} (PeerJS offline)`;
-      }, 'room_status', false);
-      this.callbacks.onToast?.('PeerJS CDN unavailable — running in local multi-tab mode.');
-      return code;
-    }
-
-    try {
-      this.peer = new window.Peer(peerId, {
-        debug: 0,
-        config: {
-          iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' }
-          ]
-        }
-      });
-
-      this.peer.on('open', () => {
-        store.mutate((s) => {
-          s.room.connected = true;
-          s.room.isHost = true;
-          s.room.statusText = `Hosting ${code} • 0 peers`;
-        }, 'room_status', false);
-        store.addFeed({ type: 'system', text: `Live room ${code} created! Share the code or QR with opponents.` }, false);
-        this.callbacks.onToast?.(`Room ${code} is LIVE!`);
-      });
-
-      this.peer.on('connection', (conn) => {
-        conn.on('open', () => {
-          this.guestConns.set(conn.peer, conn);
-          this.updateHostPeerCount();
-          // Push authoritative snapshot to joining guest
-          conn.send({ type: 'snapshot', payload: store.getSharedSnapshot() });
-        });
-        conn.on('data', (msg) => this.handleHostMessage(conn, msg));
-        conn.on('close', () => {
-          this.guestConns.delete(conn.peer);
-          this.updateHostPeerCount();
-        });
-        conn.on('error', () => {
-          this.guestConns.delete(conn.peer);
-          this.updateHostPeerCount();
-        });
-      });
-
-      this.peer.on('error', (err) => {
-        console.warn('PeerJS host error:', err);
-        if (err.type === 'unavailable-id') {
-          this.callbacks.onToast?.(`Room ${code} already exists — try Joining it or pick a fresh code.`);
-        }
-        store.mutate((s) => {
-          s.room.statusText = `Room ${code} (${err.type || 'reconnecting'})`;
-        }, 'room_status', false);
-      });
-    } catch (e) {
-      console.error(e);
-    }
-    return code;
+    const code = normalizeRoomCode(rawCode) || generateRoomCode();
+    return this.connectCloudRoom(code, true);
   }
 
   joinPeerRoom(rawCode) {
-    this.disconnect();
-    const code = rawCode.toUpperCase().trim();
-    if (!code) return;
-    const hostPeerId = `jetlag-syd-room-${cleanCode(code)}`;
-
-    store.mutate((s) => {
-      s.room.engine = 'peerjs';
-      s.room.code = code;
-      s.room.isHost = false;
-      s.room.connected = false;
-      s.room.statusText = `Connecting to ${code}…`;
-    }, 'room_status', false);
-
-    this.setupBroadcastChannel(code, false);
-
-    if (!window.Peer) {
-      store.mutate((s) => {
-        s.room.connected = true;
-        s.room.statusText = `Local Tabs Room ${code}`;
-      }, 'room_status', false);
-      return;
+    const code = normalizeRoomCode(rawCode);
+    if (!code) {
+      this.callbacks.onToast?.('Enter a valid room code (e.g. SYD-4K9P or 4K9P).');
+      return '';
     }
-
-    this.peer = new window.Peer(undefined, {
-      debug: 0,
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' }
-        ]
-      }
-    });
-
-    this.peer.on('open', () => {
-      const conn = this.peer.connect(hostPeerId, { reliable: true });
-      this.hostConn = conn;
-      conn.on('open', () => {
-        store.mutate((s) => {
-          s.room.connected = true;
-          s.room.statusText = `Connected to ${code}`;
-        }, 'room_status', false);
-        // Announce our player profile to Host
-        conn.send({ type: 'player_update', payload: store.getLocalPlayer() });
-        this.callbacks.onToast?.(`Joined live room ${code}!`);
-      });
-      conn.on('data', (msg) => {
-        if (msg?.type === 'snapshot') {
-          store.applySharedSnapshot(msg.payload);
-        }
-      });
-      conn.on('close', () => {
-        store.mutate((s) => {
-          s.room.connected = false;
-          s.room.statusText = `Disconnected from ${code} — retrying…`;
-        }, 'room_status', false);
-        this.reconnectTimer = setTimeout(() => {
-          if (store.get().room.code === code && store.get().room.engine === 'peerjs') {
-            this.joinPeerRoom(code);
-          }
-        }, 4500);
-      });
-      conn.on('error', (err) => {
-        console.warn('Guest conn error:', err);
-      });
-    });
-
-    this.peer.on('error', (err) => {
-      store.mutate((s) => {
-        s.room.statusText = `Could not reach ${code} (${err.type || 'error'})`;
-      }, 'room_status', false);
-    });
+    return this.connectCloudRoom(code, false);
   }
 
-  setupBroadcastChannel(code, isHost) {
+  connectCloudRoom(code, isCreating = false, brokerIdx = 0) {
+    this.disconnect(true);
+    this.brokerIdx = brokerIdx;
+    this.lastAppliedStateTs = 0;
+
+    const key = topicKey(code);
+    const base = `${TOPIC_PREFIX}/${key}`;
+    this.activeTopicBase = base;
+
+    store.mutate((s) => {
+      s.room.engine = 'cloud';
+      s.room.code = code;
+      s.room.isHost = isCreating;
+      s.room.connected = false;
+      s.room.statusText = `Connecting to ${code}...`;
+    }, 'room_status', false);
+
+    // Always enable instant BroadcastChannel sync for local multi-tab testing
+    this.setupBroadcastChannel(key, isCreating);
+
+    if (!window.mqtt) {
+      store.mutate((s) => {
+        s.room.connected = true;
+        s.room.statusText = `Local Tabs · ${code}`;
+      }, 'room_status', false);
+      this.callbacks.onToast?.(`Connected locally to ${code} (cloud script offline).`);
+      return code;
+    }
+
+    const broker = MQTT_BROKERS[brokerIdx % MQTT_BROKERS.length];
+    const clientId = `jlsyd_${store.get().localPlayerId}_${Math.random().toString(36).slice(2, 6)}`;
+
+    try {
+      const client = window.mqtt.connect(broker.url, {
+        clientId,
+        clean: true,
+        keepalive: 30,
+        reconnectPeriod: 2500,
+        connectTimeout: 8000
+      });
+      this.mqttClient = client;
+
+      // Failover to secondary WSS broker if primary doesn't connect within 6s
+      this.connectTimeoutTimer = setTimeout(() => {
+        if (!client.connected && this.mqttClient === client && brokerIdx + 1 < MQTT_BROKERS.length) {
+          console.warn(`Broker ${broker.name} timed out — failing over...`);
+          this.connectCloudRoom(code, isCreating, brokerIdx + 1);
+        }
+      }, 6000);
+
+      client.on('connect', () => {
+        clearTimeout(this.connectTimeoutTimer);
+        if (this.mqttClient !== client) return;
+
+        client.subscribe(`${base}/#`, { qos: 0 }, (err) => {
+          if (err) {
+            console.warn('Subscribe failed:', err);
+            return;
+          }
+          store.mutate((s) => {
+            s.room.connected = true;
+            s.room.statusText = `Live · ${code}`;
+          }, 'room_status', false);
+
+          // Immediately announce our own player node (retained so late joiners see everyone!)
+          this.publishLocalPlayerNow();
+
+          // If creating a new room, seed retained state immediately; if joining, request sync if no retained state arrives
+          if (isCreating) {
+            this.publishStateNow();
+            store.addFeed({ type: 'system', text: `Live room ${code} created. Share the code or invite link.` }, true);
+            this.callbacks.onToast?.(`Room ${code} is LIVE.`);
+          } else {
+            this.callbacks.onToast?.(`Joined live room ${code}.`);
+            // Ask any active peers to resend if broker didn't have retained state yet
+            try {
+              client.publish(`${base}/ping`, JSON.stringify({ senderId: store.get().localPlayerId, ts: Date.now() }));
+            } catch {}
+          }
+        });
+      });
+
+      client.on('message', (topic, payloadBuf) => {
+        if (this.mqttClient !== client) return;
+        try {
+          const msg = JSON.parse(payloadBuf.toString());
+          if (!msg || msg.senderId === store.get().localPlayerId) return;
+
+          if (topic === `${base}/state` && msg.payload) {
+            const ts = msg.ts || msg.payload.updatedAt || 0;
+            if (ts >= this.lastAppliedStateTs) {
+              this.lastAppliedStateTs = ts;
+              store.applySharedSnapshot(msg.payload);
+            }
+          } else if (topic.startsWith(`${base}/players/`) && msg.payload?.id) {
+            const pid = msg.payload.id;
+            if (pid !== store.get().localPlayerId) {
+              store.mutate((s) => {
+                s.players[pid] = { ...(s.players[pid] || {}), ...msg.payload, online: true };
+              }, 'remote_sync', false);
+            }
+          } else if (topic === `${base}/ping`) {
+            // Peer requested current state/presence
+            this.publishLocalPlayerNow();
+            if (store.get().room.isHost) this.publishStateNow();
+          }
+        } catch (e) {
+          console.warn('Bad room packet:', e);
+        }
+      });
+
+      client.on('reconnect', () => {
+        store.mutate((s) => {
+          s.room.statusText = `Reconnecting ${code}...`;
+        }, 'room_status', false);
+      });
+
+      client.on('offline', () => {
+        store.mutate((s) => {
+          s.room.statusText = `Offline (${code}) — retrying...`;
+        }, 'room_status', false);
+      });
+
+      client.on('error', (err) => {
+        console.warn('MQTT sync error:', err?.message || err);
+      });
+
+      // Gentle 20s presence heartbeat so everyone stays fresh even through mobile sleep
+      this.heartbeatTimer = setInterval(() => {
+        if (store.get().room.connected) this.publishLocalPlayerNow();
+      }, 20000);
+    } catch (e) {
+      console.error('Cloud room connect failed:', e);
+      store.mutate((s) => {
+        s.room.connected = true;
+        s.room.statusText = `Local Tabs · ${code}`;
+      }, 'room_status', false);
+    }
+
+    return code;
+  }
+
+  setupBroadcastChannel(key, isCreating) {
     if (typeof BroadcastChannel === 'undefined') return;
-    this.bc = new BroadcastChannel(`jetlag-syd-${cleanCode(code)}`);
+    this.bc = new BroadcastChannel(`jetlag-syd-${key}`);
     this.bc.onmessage = (ev) => {
       const msg = ev.data;
       if (!msg || msg.senderId === store.get().localPlayerId) return;
-      if (msg.type === 'snapshot') {
+      if (msg.type === 'snapshot' && msg.payload) {
         store.applySharedSnapshot(msg.payload);
-      } else if (msg.type === 'player_update') {
+      } else if (msg.type === 'player_update' && msg.payload?.id) {
         store.mutate((s) => {
-          s.players[msg.payload.id] = msg.payload;
+          s.players[msg.payload.id] = { ...(s.players[msg.payload.id] || {}), ...msg.payload, online: true };
         }, 'remote_sync', false);
-        if (isHost) this.broadcastSnapshotToPeers();
-      } else if (msg.type === 'hello' && isHost) {
-        this.bc.postMessage({ type: 'snapshot', senderId: store.get().localPlayerId, payload: store.getSharedSnapshot() });
+      } else if (msg.type === 'hello') {
+        this.bc.postMessage({ type: 'player_update', senderId: store.get().localPlayerId, payload: store.getLocalPlayer() });
+        if (store.get().room.isHost) {
+          this.bc.postMessage({ type: 'snapshot', senderId: store.get().localPlayerId, payload: store.getSharedSnapshot() });
+        }
       }
     };
-    if (!isHost) {
+    if (!isCreating) {
       this.bc.postMessage({ type: 'hello', senderId: store.get().localPlayerId });
       this.bc.postMessage({ type: 'player_update', senderId: store.get().localPlayerId, payload: store.getLocalPlayer() });
     }
   }
 
-  handleHostMessage(conn, msg) {
-    if (!msg) return;
-    if (msg.type === 'player_update' && msg.payload?.id) {
-      store.mutate((s) => {
-        s.players[msg.payload.id] = { ...(s.players[msg.payload.id] || {}), ...msg.payload, lastSeen: Date.now(), online: true };
-      }, 'remote_sync', false);
-      this.broadcastSnapshotToPeers(conn.peer);
-    } else if (msg.type === 'snapshot' && msg.payload) {
-      store.applySharedSnapshot(msg.payload);
-      this.broadcastSnapshotToPeers(conn.peer);
-    }
-  }
-
-  updateHostPeerCount() {
+  publishStateNow() {
     const s = store.get();
-    if (!s.room.isHost) return;
-    store.mutate((st) => {
-      st.room.statusText = `Hosting ${st.room.code} • ${this.guestConns.size} peer${this.guestConns.size === 1 ? '' : 's'}`;
-    }, 'room_status', false);
-  }
+    if (!s.room.connected) return;
+    const snap = store.getSharedSnapshot();
+    const now = Date.now();
+    this.lastAppliedStateTs = Math.max(this.lastAppliedStateTs, now);
 
-  // ===== ENGINE 2: TUNNEL-PROOF FIREBASE REALTIME DATABASE (REST + SSE) =====
-  async connectFirebaseRoom(rawUrl, rawCode) {
-    this.disconnect();
-    const dbUrl = (rawUrl || '').trim().replace(/\/+$/, '');
-    if (!dbUrl.startsWith('https://')) {
-      this.callbacks.onToast?.('Please enter a valid https:// Firebase Realtime Database URL.');
+    if (s.room.engine === 'firebase' && s.room.firebaseUrl) {
+      const roomPath = `${s.room.firebaseUrl.replace(/\/+$/, '')}/jetlag_rooms/${topicKey(s.room.code)}`;
+      fetch(`${roomPath}/state.json`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(snap)
+      }).catch(() => {});
       return;
     }
-    const code = rawCode ? rawCode.toUpperCase().trim() : generateRoomCode();
-    const roomPath = `${dbUrl}/jetlag_rooms/${cleanCode(code)}`;
+
+    if (this.mqttClient?.connected && this.activeTopicBase) {
+      try {
+        this.mqttClient.publish(
+          `${this.activeTopicBase}/state`,
+          JSON.stringify({ senderId: s.localPlayerId, ts: now, payload: snap }),
+          { qos: 0, retain: true }
+        );
+      } catch {}
+    }
+    this.bc?.postMessage({ type: 'snapshot', senderId: s.localPlayerId, payload: snap });
+  }
+
+  publishLocalPlayerNow() {
+    const s = store.get();
+    const p = store.getLocalPlayer();
+    if (!p || !s.room.connected) return;
+    const payload = { ...p, lastSeen: Date.now(), online: true };
+
+    if (s.room.engine === 'firebase' && s.room.firebaseUrl) {
+      const roomPath = `${s.room.firebaseUrl.replace(/\/+$/, '')}/jetlag_rooms/${topicKey(s.room.code)}`;
+      this.pushFirebasePlayer(roomPath);
+      return;
+    }
+
+    if (this.mqttClient?.connected && this.activeTopicBase) {
+      try {
+        this.mqttClient.publish(
+          `${this.activeTopicBase}/players/${p.id}`,
+          JSON.stringify({ senderId: s.localPlayerId, ts: Date.now(), payload }),
+          { qos: 0, retain: true }
+        );
+      } catch {}
+    }
+    this.bc?.postMessage({ type: 'player_update', senderId: s.localPlayerId, payload });
+  }
+
+  forceSyncNow() {
+    if (!store.get().room.connected) return this.callbacks.onToast?.('Not connected to a room.');
+    this.publishLocalPlayerNow();
+    this.publishStateNow();
+    this.callbacks.onToast?.('Synced room state to all connected players.');
+  }
+
+  scheduleStateSync() {
+    clearTimeout(this.stateSyncTimer);
+    this.stateSyncTimer = setTimeout(() => this.publishStateNow(), 120);
+  }
+
+  schedulePlayerSync() {
+    clearTimeout(this.playerSyncTimer);
+    this.playerSyncTimer = setTimeout(() => this.publishLocalPlayerNow(), 280);
+  }
+
+  // ===== ENGINE 2: OPTIONAL PRIVATE FIREBASE REALTIME DATABASE (REST + SSE) =====
+  async connectFirebaseRoom(rawUrl, rawCode) {
+    this.disconnect(true);
+    const dbUrl = (rawUrl || '').trim().replace(/\/+$/, '');
+    if (!dbUrl.startsWith('https://')) {
+      this.callbacks.onToast?.('Enter a valid https:// Firebase Realtime Database URL.');
+      return;
+    }
+    const code = normalizeRoomCode(rawCode) || generateRoomCode();
+    const roomPath = `${dbUrl}/jetlag_rooms/${topicKey(code)}`;
 
     store.mutate((s) => {
       s.room.engine = 'firebase';
@@ -310,11 +400,10 @@ export class MultiplayerManager {
       s.room.code = code;
       s.room.isHost = false;
       s.room.connected = false;
-      s.room.statusText = `Connecting Firebase ${code}…`;
+      s.room.statusText = `Connecting Firebase ${code}...`;
     }, 'room_status', false);
 
     try {
-      // Check if room exists; if not, seed it with current snapshot
       const existing = await fetch(`${roomPath}/state.json`).then((r) => r.json());
       if (existing && existing.game) {
         store.applySharedSnapshot(existing);
@@ -325,10 +414,8 @@ export class MultiplayerManager {
           body: JSON.stringify(store.getSharedSnapshot())
         });
       }
-      // Push our own player node separately to prevent race overwrites
       await this.pushFirebasePlayer(roomPath);
 
-      // Open Server-Sent Events live stream (auto-reconnects through tunnels!)
       const es = new EventSource(`${roomPath}.json`);
       this.firebaseES = es;
 
@@ -341,7 +428,7 @@ export class MultiplayerManager {
             if (msg.data.players) {
               store.mutate((s) => {
                 for (const [pid, pdata] of Object.entries(msg.data.players)) {
-                  if (pid !== s.localPlayerId) s.players[pid] = pdata;
+                  if (pid !== s.localPlayerId && pdata) s.players[pid] = pdata;
                 }
               }, 'remote_sync', false);
             }
@@ -363,27 +450,27 @@ export class MultiplayerManager {
       es.onopen = () => {
         store.mutate((s) => {
           s.room.connected = true;
-          s.room.statusText = `Firebase Live • ${code}`;
+          s.room.statusText = `Firebase · ${code}`;
         }, 'room_status', false);
       };
       es.onerror = () => {
         store.mutate((s) => {
-          s.room.statusText = `Firebase reconnecting (${code})…`;
+          s.room.statusText = `Firebase reconnecting (${code})...`;
         }, 'room_status', false);
       };
 
       store.mutate((s) => {
         s.room.connected = true;
-        s.room.statusText = `Firebase Live • ${code}`;
+        s.room.statusText = `Firebase · ${code}`;
       }, 'room_status', false);
-      this.callbacks.onToast?.(`Connected to Firebase room ${code}!`);
+      this.callbacks.onToast?.(`Connected to Firebase room ${code}.`);
     } catch (err) {
       console.error('Firebase sync error:', err);
       store.mutate((s) => {
         s.room.connected = false;
         s.room.statusText = 'Firebase Error (check DB rules/URL)';
       }, 'room_status', false);
-      this.callbacks.onToast?.('Firebase connection failed — ensure your RTDB URL is correct & read/write rules allow access.');
+      this.callbacks.onToast?.('Firebase connection failed — check your RTDB URL and read/write rules.');
     }
   }
 
@@ -394,63 +481,9 @@ export class MultiplayerManager {
       await fetch(`${roomPath}/players/${p.id}.json`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(p)
+        body: JSON.stringify({ ...p, lastSeen: Date.now(), online: true })
       });
     } catch {}
-  }
-
-  // ===== BROADCAST SCHEDULER =====
-  scheduleBroadcast(reason) {
-    clearTimeout(this.pendingSyncTimer);
-    const delay = reason === 'gps' ? 350 : 120;
-    this.pendingSyncTimer = setTimeout(() => {
-      const s = store.get();
-      if (!s.room.connected) return;
-
-      if (s.room.engine === 'firebase' && s.room.firebaseUrl) {
-        const roomPath = `${s.room.firebaseUrl.replace(/\/+$/, '')}/jetlag_rooms/${cleanCode(s.room.code)}`;
-        if (reason === 'gps') {
-          this.pushFirebasePlayer(roomPath);
-        } else {
-          fetch(`${roomPath}/state.json`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(store.getSharedSnapshot())
-          }).catch(() => {});
-          this.pushFirebasePlayer(roomPath);
-        }
-        return;
-      }
-
-      // PeerJS + BroadcastChannel
-      if (reason === 'gps') {
-        const p = store.getLocalPlayer();
-        if (s.room.isHost) {
-          this.broadcastSnapshotToPeers();
-        } else if (this.hostConn?.open) {
-          this.hostConn.send({ type: 'player_update', payload: p });
-        }
-        this.bc?.postMessage({ type: 'player_update', senderId: s.localPlayerId, payload: p });
-      } else {
-        if (s.room.isHost) {
-          this.broadcastSnapshotToPeers();
-        } else if (this.hostConn?.open) {
-          this.hostConn.send({ type: 'snapshot', payload: store.getSharedSnapshot() });
-        }
-        this.bc?.postMessage({ type: 'snapshot', senderId: s.localPlayerId, payload: store.getSharedSnapshot() });
-      }
-    }, delay);
-  }
-
-  broadcastSnapshotToPeers(excludePeerId = null) {
-    const snap = store.getSharedSnapshot();
-    for (const [pid, conn] of this.guestConns.entries()) {
-      if (pid === excludePeerId) continue;
-      if (conn.open) {
-        try { conn.send({ type: 'snapshot', payload: snap }); } catch {}
-      }
-    }
-    this.bc?.postMessage({ type: 'snapshot', senderId: store.get().localPlayerId, payload: snap });
   }
 
   // ===== LIVE GPS TRACKING =====
@@ -475,7 +508,6 @@ export class MultiplayerManager {
           p.speed = speed;
           p.lastSeen = Date.now();
           p.online = true;
-          // Auto-unfreeze if freeze timer expired
           if (p.gpsFrozen && s.room.freezeEndsAt && Date.now() > s.room.freezeEndsAt) {
             p.gpsFrozen = false;
             p.frozenLat = null;
@@ -486,7 +518,7 @@ export class MultiplayerManager {
       },
       (err) => {
         console.warn('GPS error:', err);
-        this.callbacks.onToast?.(`GPS unavailable (${err.message}). You can use Demo Pin to test anywhere in Sydney!`);
+        this.callbacks.onToast?.(`GPS unavailable (${err.message}). Use a Demo Pin in the Live tab to test.`);
       },
       { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
     );
@@ -510,6 +542,6 @@ export class MultiplayerManager {
       p.lastSeen = Date.now();
       p.online = true;
     }, 'gps', true);
-    if (label) this.callbacks.onToast?.(`Demo GPS positioned at ${label}`);
+    if (label) this.callbacks.onToast?.(`Demo GPS positioned at ${label}.`);
   }
 }

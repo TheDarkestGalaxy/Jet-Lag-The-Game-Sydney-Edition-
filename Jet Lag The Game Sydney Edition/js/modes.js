@@ -298,6 +298,10 @@ export function computeRailRushStats(network, claimedStations, teams, lineBonus 
 /** Determine whether player `targetPlayer` GPS should be visible to `viewerPlayer` */
 export function canSeePlayerGps(state, viewerPlayer, targetPlayer) {
   if (!targetPlayer || targetPlayer.lat == null || targetPlayer.lng == null) return false;
+  // Non-playing Event Hosts do not appear as competing pins on the map
+  if (targetPlayer.isEventHost) return false;
+  // Non-playing Event Host (GM) has full spectator visibility of all players
+  if (viewerPlayer?.isEventHost) return true;
   if (viewerPlayer && targetPlayer.id === viewerPlayer.id) return true;
   if (targetPlayer.gpsHidden) return false;
 

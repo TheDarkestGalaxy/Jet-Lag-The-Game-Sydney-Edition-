@@ -1,7 +1,7 @@
-// Jet Lag: Sydney Edition — Main Application Orchestrator
+// Jet Lag: Sydney Edition — Mobile-First Main Application Orchestrator
 import { SYDNEY_NETWORK } from '../data/sydney-network.js';
-import { CHALLENGE_CATEGORIES, POWERUPS_SHOP, TRANSIT_RATES, DEFAULT_CHALLENGES, DEFAULT_CURSES } from '../data/challenges.js';
-import { store, uid } from './state.js';
+import { CHALLENGE_CATEGORIES, POWERUPS_SHOP, TRANSIT_RATES, DEFAULT_CHALLENGES, DEFAULT_CURSES } from '../data/challenges.js?v=9';
+import { store, uid } from './state.js?v=9';
 import {
   GAME_MODES,
   RULE_MODULES,
@@ -12,11 +12,11 @@ import {
   formatDistance,
   formatClock,
   getDividingSide
-} from './modes.js';
-import { SydneyMapController } from './map.js';
-import { ChallengeWheel } from './wheel.js';
-import { MultiplayerManager, generateRoomCode, compressImageFile } from './multiplayer.js';
-import { icon } from './icons.js';
+} from './modes.js?v=9';
+import { SydneyMapController } from './map.js?v=9';
+import { ChallengeWheel } from './wheel.js?v=9';
+import { MultiplayerManager, generateRoomCode, normalizeRoomCode, compressImageFile } from './multiplayer.js?v=9';
+import { icon } from './icons.js?v=9';
 
 function esc(str) {
   return String(str ?? '')
@@ -26,15 +26,101 @@ function esc(str) {
     .replace(/"/g, '&quot;');
 }
 
+function defaultScheduleDateTime() {
+  const d = new Date(Date.now() + 60 * 60 * 1000);
+  d.setMinutes(0, 0, 0);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function formatScheduledCountdown(ms) {
+  if (ms <= 0) return 'READY FOR KICKOFF';
+  const totalSec = Math.floor(ms / 1000);
+  const days = Math.floor(totalSec / 86400);
+  const hrs = Math.floor((totalSec % 86400) / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  const secs = totalSec % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return days > 0 ? `${days}d ${pad(hrs)}:${pad(mins)}:${pad(secs)}` : `${pad(hrs)}:${pad(mins)}:${pad(secs)}`;
+}
+
+function encodeScheduleParam(sched) {
+  try {
+    const compact = {
+      t: sched.title,
+      m: sched.mode,
+      s: sched.startTimeIso,
+      p: sched.meetingStation,
+      c: sched.roomCode,
+      g: sched.hostIsSpectator ? (sched.hostName || 'Host') : ''
+    };
+    return btoa(unescape(encodeURIComponent(JSON.stringify(compact))));
+  } catch {
+    return '';
+  }
+}
+
+function decodeScheduleParam(str) {
+  try {
+    const raw = JSON.parse(decodeURIComponent(escape(atob(str))));
+    if (!raw || !raw.s || !raw.c) return null;
+    return {
+      id: uid('sched'),
+      title: raw.t || 'Scheduled Jet Lag Session',
+      mode: GAME_MODES[raw.m] ? raw.m : 'hide_seek',
+      startTimeIso: raw.s,
+      meetingStation: raw.p || 'Central',
+      roomCode: raw.c,
+      hostIsSpectator: Boolean(raw.g),
+      hostName: raw.g || '',
+      locked: true,
+      lockedAt: Date.now(),
+      rsvps: []
+    };
+  } catch {
+    return null;
+  }
+}
+
+function downloadScheduleIcs(sched, inviteUrl) {
+  const start = new Date(sched.startTimeIso);
+  const end = new Date(start.getTime() + 3 * 60 * 60 * 1000);
+  const fmt = (dt) =>
+    dt.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+  const modeName = GAME_MODES[sched.mode]?.name || sched.mode;
+  const lines = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'PRODID:-//Jet Lag Sydney Edition//EN',
+    'BEGIN:VEVENT',
+    `UID:${sched.id || Date.now()}@jetlag-sydney`,
+    `DTSTAMP:${fmt(new Date())}`,
+    `DTSTART:${fmt(start)}`,
+    `DTEND:${fmt(end)}`,
+    `SUMMARY:${sched.title} (${modeName})`,
+    `LOCATION:${sched.meetingStation}, Sydney NSW`,
+    `DESCRIPTION:Room Code: ${sched.roomCode}\\nMode: ${modeName}\\nJoin Link: ${inviteUrl}`,
+    'END:VEVENT',
+    'END:VCALENDAR'
+  ];
+  const blob = new Blob([lines.join('\r\n')], { type: 'text/calendar;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `jetlag-sydney-${(sched.roomCode || 'game').toLowerCase()}.ics`;
+  a.click();
+}
+
 class JetLagSydneyApp {
   constructor() {
     this.activeTab = 'game';
+    this.wheelSubTab = 'spin'; // 'spin' | 'shop' | 'deck'
+    this.deckKind = 'challenges'; // 'challenges' | 'curses'
     this.wheelMode = 'challenges'; // 'challenges' | 'curses'
     this.wheelCat = 'all';
     this.wheelDiff = 'all';
     this.landedCard = null;
     this.feedFilter = 'all';
-    this.showDeckBuilder = false;
+    this.showModePicker = false;
     this.showRulesConfig = false;
     this.pendingPhotoDataUrl = null;
     this.qaCategoryFilter = 'Radar';
@@ -45,21 +131,25 @@ class JetLagSydneyApp {
   }
 
   init() {
-    // Register PWA Service Worker
-    if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
-      navigator.serviceWorker.register('./sw.js').catch(() => {});
+    if ('serviceWorker' in navigator) {
+      if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
+        // Avoid stale local-dev caches; unregister any older SW on localhost
+        navigator.serviceWorker.getRegistrations().then((regs) => regs.forEach((r) => r.unregister())).catch(() => {});
+        if ('caches' in window) {
+          caches.keys().then((keys) => keys.forEach((k) => caches.delete(k))).catch(() => {});
+        }
+      } else if (location.protocol === 'https:') {
+        navigator.serviceWorker.register('./sw.js?v=9').then((reg) => reg.update()).catch(() => {});
+      }
     }
 
-    // Apply saved theme
     this.applyTheme(store.get().theme);
 
-    // Update network badge
     const metaEl = document.getElementById('network-meta-sub');
     if (metaEl) {
-      metaEl.textContent = `${SYDNEY_NETWORK.stations.length} Real Stops · ${SYDNEY_NETWORK.lines.length} Lines`;
+      metaEl.textContent = `${SYDNEY_NETWORK.stations.length} Stops · ${SYDNEY_NETWORK.lines.length} Lines`;
     }
 
-    // Init Multiplayer Manager
     this.mp = new MultiplayerManager({
       onToast: (msg) => this.toast(msg),
       onGpsUpdate: () => {
@@ -67,16 +157,19 @@ class JetLagSydneyApp {
       }
     });
 
-    // Init Interactive Sydney Map
     this.mapCtrl = new SydneyMapController('sydney-map', {
       onToast: (msg) => this.toast(msg),
       onToolStatus: (hint) => this.updateToolBanner(hint),
       onLineClick: (line) => {
         this.toast(`${line.code}: ${line.name} (${line.stationIds.length} stops)`);
       },
-      onToggleClaim: (station, claim) => this.toggleStationClaim(station, claim),
+      onToggleClaim: (station, claim, teamId) => this.toggleStationClaim(station, claim, teamId),
       onSetHidingZone: (station) => this.setHidingZoneAt(station),
-      onDropFlag: (station) => this.dropFlagAt(station),
+      onDropFlag: (station, teamId) => this.dropFlagAt(station, teamId),
+      onHostBroadcastStation: (station) => {
+        store.addFeed({ type: 'broadcast', author: `${store.getLocalPlayer()?.name || 'Host'} (HOST)`, teamId: null, text: `Station Spotlight: ${station.name} (${station.lines.join(', ')})` });
+        this.toast(`Broadcasted station alert for ${station.name}.`);
+      },
       onAddCheckpoint: (station) => this.addCheckpoint(station),
       onCheckCheckpoint: (cpId) => this.toggleCheckpointDone(cpId),
       onQuickRadar: (lat, lng, label) => this.openRadarModal(lat, lng, label),
@@ -85,7 +178,6 @@ class JetLagSydneyApp {
     });
     this.mapCtrl.init();
 
-    // Init Canvas Challenge Wheel
     const canvas = document.getElementById('challenge-wheel-canvas');
     this.wheel = new ChallengeWheel(canvas, {
       onSpinStart: () => {
@@ -101,39 +193,105 @@ class JetLagSydneyApp {
 
     this.bindStaticUI();
     this.refreshWheelPool();
+    this.renderLayerLineExplorer();
     this.renderAll();
 
-    // Subscribe to reactive state changes
     store.subscribe((state, reason) => {
       this.renderTopbar(state);
-      if (reason !== 'gps') {
-        this.renderDynamicPanes();
-      } else if (this.activeTab === 'live') {
-        this.renderLivePane();
+      // Avoid wiping an input the user is actively typing in during background remote/GPS syncs
+      const activeEl = document.activeElement;
+      const typingInFeed = activeEl && activeEl.closest?.('#pane-feed') && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA');
+      const typingInLive = activeEl && activeEl.closest?.('#pane-live') && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA');
+      const typingInDeck = activeEl && activeEl.closest?.('#wsub-deck') && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA');
+
+      if (reason === 'gps') {
+        if (this.activeTab === 'live' && !typingInLive) this.renderLivePane();
+        return;
       }
+      this.renderGamePane();
+      if (!typingInDeck) this.renderWheelSideSections();
+      if (!typingInFeed) this.renderFeedPane();
+      if (!typingInLive || reason === 'room_status') this.renderLivePane();
     });
 
-    // 1-second live timer ticker (updates clocks/veto/curses without resetting inputs!)
     setInterval(() => this.tickTimers(), 1000);
 
-    // Auto-join room from URL query string (?room=SYD-XXXX&fb=...)
     const params = new URLSearchParams(window.location.search);
     const roomParam = params.get('room');
     const fbParam = params.get('fb');
-    if (roomParam) {
+    const schedParam = params.get('sched');
+    if (schedParam) {
+      const decoded = decodeScheduleParam(schedParam);
+      if (decoded) {
+        store.mutate((s) => {
+          s.scheduledRoom = decoded;
+          s.game.mode = decoded.mode;
+          s.game.rules = getDefaultRulesForMode(decoded.mode);
+          s.room.code = decoded.roomCode;
+        }, 'schedule', false);
+        setTimeout(() => {
+          this.openTabOnMobileOrDesktop('live');
+          this.toast(`Loaded locked-in game: ${decoded.title}`);
+        }, 300);
+      }
+    } else if (roomParam) {
       setTimeout(() => {
-        if (fbParam) {
-          this.mp.connectFirebaseRoom(fbParam, roomParam);
-        } else {
-          this.mp.joinPeerRoom(roomParam);
-        }
-        this.switchTab('live');
+        if (fbParam) this.mp.connectFirebaseRoom(fbParam, roomParam);
+        else this.mp.joinPeerRoom(roomParam);
+        this.openTabOnMobileOrDesktop('live');
       }, 400);
     }
   }
 
-  // ===== STATIC EVENT BINDINGS =====
+  // ===== POPOVERS & STATIC UI =====
+  closePopovers() {
+    document.querySelectorAll('.map-popover').forEach((p) => p.classList.remove('open'));
+    document.getElementById('fab-tools')?.classList.toggle('active', this.mapCtrl?.activeTool !== 'select');
+    document.getElementById('fab-layers')?.classList.toggle('active', Boolean(this.mapCtrl?.isolatedLine));
+  }
+
+  togglePopover(id, fabId) {
+    const el = document.getElementById(id);
+    const wasOpen = el.classList.contains('open');
+    this.closePopovers();
+    if (!wasOpen) {
+      el.classList.add('open');
+      document.getElementById(fabId)?.classList.add('active');
+    }
+  }
+
   bindStaticUI() {
+    // Map FAB Popovers
+    document.getElementById('fab-tools').addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.togglePopover('popover-tools', 'fab-tools');
+    });
+    document.getElementById('fab-layers').addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.renderLayerLineExplorer();
+      this.togglePopover('popover-layers', 'fab-layers');
+    });
+    document.querySelectorAll('[data-close-popover]').forEach((b) => {
+      b.addEventListener('click', () => this.closePopovers());
+    });
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.map-popover') && !e.target.closest('.map-fab-stack')) {
+        this.closePopovers();
+      }
+      if (!e.target.closest('.map-search-bar')) {
+        document.getElementById('station-search-results')?.classList.remove('open');
+      }
+    });
+
+    // Clear isolated line pill
+    document.getElementById('btn-clear-isolated').addEventListener('click', () => {
+      if (this.mapCtrl.isolatedLine) {
+        this.mapCtrl.toggleIsolateLine(this.mapCtrl.isolatedLine);
+        this.updateIsolatedPill();
+        this.renderLayerLineExplorer();
+      }
+    });
+
     // Desktop side panel tabs
     document.querySelectorAll('.tab-btn').forEach((btn) => {
       btn.addEventListener('click', () => this.switchTab(btn.dataset.tab));
@@ -145,6 +303,7 @@ class JetLagSydneyApp {
         const target = btn.dataset.mobileTab;
         document.querySelectorAll('[data-mobile-tab]').forEach((b) => b.classList.toggle('active', b === btn));
         const drawer = document.getElementById('side-panel');
+        this.closePopovers();
         if (target === 'map') {
           drawer.classList.remove('mobile-open');
           this.mapCtrl.invalidateSize();
@@ -160,18 +319,28 @@ class JetLagSydneyApp {
       document.querySelectorAll('[data-mobile-tab]').forEach((b) => b.classList.toggle('active', b.dataset.mobileTab === 'map'));
     });
 
-    // Topbar buttons
-    document.getElementById('topbar-mode-btn').addEventListener('click', () => this.openTabOnMobileOrDesktop('game'));
+    // Wheel sub-tabs (Wheel | Powerup Shop | Deck Builder)
+    document.querySelectorAll('[data-wsub]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.wheelSubTab = btn.dataset.wsub;
+        document.querySelectorAll('[data-wsub]').forEach((b) => b.classList.toggle('active', b === btn));
+        document.querySelectorAll('.sub-view').forEach((v) => v.classList.toggle('active', v.id === `wsub-${this.wheelSubTab}`));
+        if (this.wheelSubTab === 'spin') setTimeout(() => this.wheel.draw(), 50);
+        this.renderWheelSideSections();
+      });
+    });
+
+    // Topbar actions
+    document.getElementById('topbar-mode-btn').addEventListener('click', () => {
+      this.showModePicker = true;
+      this.openTabOnMobileOrDesktop('game');
+    });
     document.getElementById('topbar-room-btn').addEventListener('click', () => this.openTabOnMobileOrDesktop('live'));
     document.getElementById('topbar-clock-btn').addEventListener('click', () => this.toggleGameClock());
     document.getElementById('btn-theme-toggle').addEventListener('click', () => {
       const next = store.get().theme === 'dark' ? 'light' : 'dark';
       store.mutate((s) => { s.theme = next; }, 'theme', false);
       this.applyTheme(next);
-    });
-    document.getElementById('btn-sound-toggle').addEventListener('click', () => {
-      store.mutate((s) => { s.soundEnabled = !s.soundEnabled; }, 'sound', false);
-      this.renderTopbar(store.get());
     });
 
     // Station search autocomplete
@@ -194,7 +363,7 @@ class JetLagSydneyApp {
           const bStarts = b.name.toLowerCase().startsWith(q) ? 0 : 1;
           return aStarts - bStarts || b.lines.length - a.lines.length;
         })
-        .slice(0, 12);
+        .slice(0, 10);
 
       if (!matches.length) {
         searchResults.innerHTML = `<div style="padding:10px 12px" class="muted">No stations matching "${esc(q)}"</div>`;
@@ -235,13 +404,13 @@ class JetLagSydneyApp {
       searchResults.classList.remove('open');
       searchInput.blur();
     });
-    document.addEventListener('click', (e) => {
-      if (!e.target.closest('.map-search-bar')) searchResults.classList.remove('open');
-    });
 
-    // Map strategy tool buttons
+    // Map strategy tools (inside Tools popover)
     document.querySelectorAll('[data-map-tool]').forEach((btn) => {
-      btn.addEventListener('click', () => this.selectMapTool(btn.dataset.mapTool));
+      btn.addEventListener('click', () => {
+        this.selectMapTool(btn.dataset.mapTool);
+        this.closePopovers();
+      });
     });
     document.getElementById('btn-undo-ann').addEventListener('click', () => {
       if (!store.get().annotations.length) return this.toast('Nothing to undo.');
@@ -252,6 +421,7 @@ class JetLagSydneyApp {
       if (!store.get().annotations.length) return;
       if (confirm('Clear all strategy overlays (radars, thermometers, zones, pins)?')) {
         store.mutate((s) => { s.annotations = []; }, 'annotation');
+        this.closePopovers();
         this.toast('Cleared all map overlays.');
       }
     });
@@ -267,7 +437,7 @@ class JetLagSydneyApp {
       this.openRadarModal(p.lat, p.lng, 'My GPS');
     });
 
-    // Map Quick Views & Basemap
+    // Map Quick Views & Basemap (inside Layers popover + GPS FAB)
     document.getElementById('btn-locate-me').addEventListener('click', () => {
       const p = store.getLocalPlayer();
       if (p?.lat != null) {
@@ -277,18 +447,25 @@ class JetLagSydneyApp {
         this.toast('Requesting live GPS location...');
       }
     });
-    document.getElementById('btn-fit-sydney').addEventListener('click', () => this.mapCtrl.fitGreaterSydney());
-    document.getElementById('btn-fit-nsw').addEventListener('click', () => this.mapCtrl.fitFullNetwork());
+    document.getElementById('btn-fit-sydney').addEventListener('click', () => {
+      this.mapCtrl.fitGreaterSydney();
+      this.closePopovers();
+    });
+    document.getElementById('btn-fit-nsw').addEventListener('click', () => {
+      this.mapCtrl.fitFullNetwork();
+      this.closePopovers();
+    });
     document.getElementById('btn-toggle-labels').addEventListener('click', (e) => {
       const next = !this.mapCtrl.showStationLabels;
       this.mapCtrl.setShowLabels(next);
-      e.currentTarget.classList.toggle('active', next);
+      e.currentTarget.classList.toggle('btn-primary', next);
+      e.currentTarget.classList.toggle('btn-secondary', !next);
     });
     document.getElementById('basemap-select').addEventListener('change', (e) => {
       this.mapCtrl.setBasemap(e.target.value);
     });
 
-    // Transit Mode Filter Chips
+    // Transit Mode Filter Chips (inside Layers popover)
     document.querySelectorAll('[data-transit-mode]').forEach((chip) => {
       chip.addEventListener('click', () => {
         chip.classList.toggle('on');
@@ -311,11 +488,82 @@ class JetLagSydneyApp {
       this.refreshWheelPool();
       this.toast('Shuffled wheel slices from active deck.');
     });
+    document.getElementById('btn-wheel-quick-create').addEventListener('click', () => {
+      this.openAddCardModal(this.wheelMode === 'curses' ? 'curse' : 'challenge');
+    });
 
-    // Modal backdrop close
     document.getElementById('app-modal').addEventListener('click', (e) => {
       if (e.target.id === 'app-modal') this.closeModal();
     });
+  }
+
+  renderLayerLineExplorer() {
+    const slot = document.getElementById('popover-line-explorer');
+    if (!slot) return;
+    const groups = [
+      { mode: 'train', label: 'Sydney Trains' },
+      { mode: 'metro', label: 'Metro' },
+      { mode: 'light_rail', label: 'Light Rail' },
+      { mode: 'ferry', label: 'Ferries' },
+      { mode: 'intercity', label: 'Intercity' }
+    ];
+    slot.innerHTML = `
+      <div class="row-between">
+        <label>Isolate a Single Line</label>
+        ${this.mapCtrl.isolatedLine ? `<button class="btn btn-xs btn-secondary" id="pop-show-all-lines">Show All</button>` : ''}
+      </div>
+      ${groups
+        .map((g) => {
+          const lines = SYDNEY_NETWORK.lines.filter((l) => l.mode === g.mode);
+          return `
+            <div style="margin-top:4px">
+              <div style="font-size:10.5px;color:var(--text-dim);margin-bottom:3px">${g.label}</div>
+              <div class="line-grid">
+                ${lines
+                  .map(
+                    (ln) => `
+                    <button class="line-pill ${this.mapCtrl.isolatedLine === ln.code ? 'isolated' : ''}"
+                      data-explore-line="${ln.code}"
+                      style="background:${ln.color};color:${ln.textColor}"
+                      title="${esc(ln.name)} (${ln.stationIds.length} stops)">
+                      ${ln.code}
+                    </button>`
+                  )
+                  .join('')}
+              </div>
+            </div>`;
+        })
+        .join('')}
+    `;
+
+    slot.querySelectorAll('[data-explore-line]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.mapCtrl.toggleIsolateLine(btn.dataset.exploreLine);
+        this.updateIsolatedPill();
+        this.renderLayerLineExplorer();
+        this.closePopovers();
+      });
+    });
+
+    slot.querySelector('#pop-show-all-lines')?.addEventListener('click', () => {
+      if (this.mapCtrl.isolatedLine) this.mapCtrl.toggleIsolateLine(this.mapCtrl.isolatedLine);
+      this.updateIsolatedPill();
+      this.renderLayerLineExplorer();
+    });
+  }
+
+  updateIsolatedPill() {
+    const pill = document.getElementById('isolated-line-pill');
+    const txt = document.getElementById('isolated-line-text');
+    const iso = this.mapCtrl.isolatedLine;
+    if (iso) {
+      const ln = this.mapCtrl.lineByCode.get(iso);
+      txt.textContent = `${iso} · ${ln?.name || ''}`;
+      pill.style.display = 'flex';
+    } else {
+      pill.style.display = 'none';
+    }
+    document.getElementById('fab-layers')?.classList.toggle('active', Boolean(iso));
   }
 
   applyTheme(theme) {
@@ -336,10 +584,10 @@ class JetLagSydneyApp {
     this.activeTab = tabName;
     document.querySelectorAll('.tab-btn').forEach((b) => b.classList.toggle('active', b.dataset.tab === tabName));
     document.querySelectorAll('.tab-pane').forEach((p) => p.classList.toggle('active', p.id === `pane-${tabName}`));
-    const titles = { game: 'Game Control', wheel: 'Challenge Wheel', shop: 'Shop & Network', feed: 'Live Feed & Chat', live: 'Multiplayer & GPS' };
+    const titles = { game: 'Game Control', wheel: 'Wheel & Shop', feed: 'Live Feed', live: 'Live Room & GPS' };
     const mTitle = document.getElementById('mobile-drawer-title');
     if (mTitle) mTitle.textContent = titles[tabName] || 'Jet Lag: Sydney';
-    if (tabName === 'wheel') {
+    if (tabName === 'wheel' && this.wheelSubTab === 'spin') {
       setTimeout(() => this.wheel.draw(), 60);
     }
     this.renderDynamicPanes();
@@ -348,6 +596,7 @@ class JetLagSydneyApp {
   selectMapTool(tool) {
     this.mapCtrl.setTool(tool);
     document.querySelectorAll('[data-map-tool]').forEach((b) => b.classList.toggle('active', b.dataset.mapTool === tool));
+    document.getElementById('fab-tools')?.classList.toggle('active', tool !== 'select');
     this.updateToolBanner(this.mapCtrl.getToolHint());
   }
 
@@ -383,15 +632,15 @@ class JetLagSydneyApp {
   renderDynamicPanes() {
     this.renderGamePane();
     this.renderWheelSideSections();
-    this.renderShopPane();
     this.renderFeedPane();
     this.renderLivePane();
   }
 
   renderTopbar(state) {
     const mode = GAME_MODES[state.game.mode] || GAME_MODES.custom;
-    document.getElementById('topbar-mode-label').textContent = mode.shortName;
-    document.getElementById('topbar-mode-dot').style.background = mode.color;
+    const isHostGm = Boolean(store.getLocalPlayer()?.isEventHost);
+    document.getElementById('topbar-mode-label').textContent = isHostGm ? `HOST · ${mode.shortName}` : mode.shortName;
+    document.getElementById('topbar-mode-dot').style.background = isHostGm ? '#a855f7' : mode.color;
 
     const roomBtn = document.getElementById('topbar-room-btn');
     roomBtn.classList.toggle('live', state.room.connected);
@@ -399,7 +648,6 @@ class JetLagSydneyApp {
       ? state.room.code
       : 'Solo';
 
-    document.getElementById('btn-sound-toggle').innerHTML = icon(state.soundEnabled ? 'volumeOn' : 'volumeOff', 15);
     this.tickTimers();
   }
 
@@ -444,6 +692,12 @@ class JetLagSydneyApp {
       const mins = Math.max(0, (now - since) / 60000);
       el.textContent = `${formatClock(now - since)} · ~${Math.round(mins * rate)} coins`;
     });
+    document.querySelectorAll('[data-sched-iso]').forEach((el) => {
+      const targetMs = Date.parse(el.dataset.schedIso);
+      if (!Number.isNaN(targetMs)) {
+        el.textContent = formatScheduledCountdown(targetMs - now);
+      }
+    });
   }
 
   toggleGameClock() {
@@ -465,7 +719,7 @@ class JetLagSydneyApp {
     store.addFeed({ type: 'system', text: status === 'running' ? 'Game clock started.' : 'Game clock paused.' });
   }
 
-  // ===== TAB 1: GAME PANE =====
+  // ===== TAB 1: GAME PANE (Active Mode First, Collapsible Setup!) =====
   renderGamePane() {
     const pane = document.getElementById('pane-game');
     if (!pane) return;
@@ -473,35 +727,92 @@ class JetLagSydneyApp {
     const mode = GAME_MODES[s.game.mode] || GAME_MODES.custom;
     const myTeam = store.getLocalTeam();
     const myPlayer = store.getLocalPlayer();
+    const isHostGm = Boolean(myPlayer?.isEventHost);
+    const rrData = s.game.rules.stationClaiming
+      ? computeRailRushStats(SYDNEY_NETWORK, s.claimedStations, s.teams, s.game.railRushLineBonus)
+      : null;
 
-    let html = `
+    // 0. Event Host (Non-Playing Game Master) Console
+    let html = '';
+    if (isHostGm) {
+      html += `
+        <div class="card host-card">
+          <div class="row-between">
+            <div class="row" style="gap:7px">
+              <span class="host-pill">EVENT HOST</span>
+              <strong style="font-family:var(--font-display)">Game Master Console</strong>
+            </div>
+            <button class="btn btn-xs btn-secondary" id="btn-gm-exit">Join as Player</button>
+          </div>
+          <div class="muted" style="font-size:11.5px">
+            Spectating without playing — you see every player's live GPS and private hiding zones, while your own pin stays hidden from competitors.
+          </div>
+          <div class="row" style="gap:6px">
+            <input type="text" id="gm-broadcast-input" class="input" placeholder="Send live announcement to all players..." style="flex:1;padding:7px 10px;font-size:13px" />
+            <button class="btn btn-primary btn-sm" id="btn-gm-broadcast">Broadcast</button>
+          </div>
+        </div>
+      `;
+    }
+
+    // 0b. Locked-In Scheduled Game Room Banner (if scheduled)
+    if (s.scheduledRoom?.locked) {
+      const sr = s.scheduledRoom;
+      const startMs = Date.parse(sr.startTimeIso);
+      const formatted = Number.isNaN(startMs)
+        ? sr.startTimeIso
+        : new Date(startMs).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+      html += `
+        <div class="card sched-card locked">
+          <div class="row-between">
+            <div class="row" style="gap:6px">${icon('lock', 14)}<strong style="font-family:var(--font-display)">${esc(sr.title)}</strong></div>
+            <span class="tag-pill" style="border-color:var(--accent);color:var(--accent)">LOCKED IN</span>
+          </div>
+          <div class="sched-countdown" data-sched-iso="${esc(sr.startTimeIso)}">${formatScheduledCountdown(startMs - Date.now())}</div>
+          <div class="row-between muted" style="font-size:11.5px">
+            <span>${esc(formatted)} · ${esc(sr.meetingStation)}${sr.hostIsSpectator ? ` · GM: ${esc(sr.hostName || 'Host')}` : ''}</span>
+            <button class="btn btn-xs btn-secondary" id="btn-game-open-sched">Manage</button>
+          </div>
+        </div>
+      `;
+    }
+
+    // 1. Compact Active Mode Header + Clock
+    html += `
       <div class="card">
-        <div class="card-header">
-          <div class="card-title">Game Mode</div>
-          <div class="row">
-            <button class="btn btn-xs btn-secondary" id="btn-toggle-rules">${icon('sliders', 12)} ${this.showRulesConfig ? 'Hide Rules' : 'Rules'}</button>
+        <div class="row-between">
+          <div class="row" style="gap:7px">
+            <span class="mode-badge" style="background:${mode.color}">${mode.badge}</span>
+            <strong style="font-family:var(--font-display);font-size:15px">${esc(mode.name)}</strong>
+          </div>
+          <div class="row" style="gap:5px">
+            <button class="btn btn-xs btn-secondary" id="btn-toggle-modes">${this.showModePicker ? 'Done' : 'Change'}</button>
+            <button class="btn btn-xs btn-ghost" id="btn-toggle-rules" title="Customise rules">${icon('sliders', 13)}</button>
             <button class="btn btn-xs btn-danger" id="btn-reset-game">Reset</button>
           </div>
         </div>
-        <div class="mode-grid">
-          ${Object.values(GAME_MODES)
-            .map(
-              (m) => `
-              <button class="mode-tile ${s.game.mode === m.id ? 'active' : ''}" data-pick-mode="${m.id}" style="--mcol:${m.color}">
-                <div class="mode-tile-top">
-                  <span class="mode-tile-name">${esc(m.shortName)}</span>
-                  <span class="mode-badge">${m.badge}</span>
-                </div>
-                <div class="mode-tile-desc">${esc(m.tagline.slice(0, 74))}...</div>
-              </button>`
-            )
-            .join('')}
-        </div>
-        <div class="muted" style="font-size:12px"><strong>${esc(mode.name)}:</strong> ${esc(mode.tagline)}</div>
+        ${
+          this.showModePicker
+            ? `<div class="mode-grid">
+                ${Object.values(GAME_MODES)
+                  .map(
+                    (m) => `
+                    <button class="mode-tile ${s.game.mode === m.id ? 'active' : ''}" data-pick-mode="${m.id}" style="--mcol:${m.color}">
+                      <div class="mode-tile-top">
+                        <span class="mode-tile-name">${esc(m.shortName)}</span>
+                        <span class="mode-badge">${m.badge}</span>
+                      </div>
+                      <div class="mode-tile-desc">${esc(m.tagline.slice(0, 68))}...</div>
+                    </button>`
+                  )
+                  .join('')}
+              </div>`
+            : `<div class="muted" style="font-size:12px">${esc(mode.tagline)}</div>`
+        }
         <div class="row">
           <button class="btn btn-primary btn-sm" id="btn-game-start-pause" style="flex:1">
             ${icon(s.game.status === 'running' ? 'pause' : 'play', 13)}
-            ${s.game.status === 'running' ? 'Pause Clock' : s.game.status === 'paused' ? 'Resume Clock' : 'Start Game Clock'}
+            ${s.game.status === 'running' ? 'Pause Clock' : s.game.status === 'paused' ? 'Resume Clock' : 'Start Clock'}
           </button>
           ${
             s.game.rules.hideSeekQA
@@ -517,7 +828,7 @@ class JetLagSydneyApp {
         <div class="card">
           <div class="card-header">
             <div class="card-title">Modular Rules</div>
-            <span class="muted">Customise for house games</span>
+            <span class="muted">Toggle any feature</span>
           </div>
           <div>
             ${RULE_MODULES.map(
@@ -535,60 +846,7 @@ class JetLagSydneyApp {
       `;
     }
 
-    const rrData = s.game.rules.stationClaiming
-      ? computeRailRushStats(SYDNEY_NETWORK, s.claimedStations, s.teams, s.game.railRushLineBonus)
-      : null;
-
-    html += `
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Teams & Roles</div>
-          <button class="btn btn-xs btn-secondary" id="btn-add-team">+ Add Team</button>
-        </div>
-        ${s.teams
-          .map((t) => {
-            const isMine = myTeam?.id === t.id;
-            const members = Object.values(s.players).filter((p) => p.teamId === t.id);
-            const vetoRem = (t.vetoEndsAt || 0) - Date.now();
-            const rrScore = rrData?.teamStats?.[t.id];
-            return `
-              <div class="team-card" style="--tcol:${t.color}">
-                <div class="row-between">
-                  <div class="row">
-                    <strong style="font-family:var(--font-display)">${esc(t.name)}</strong>
-                    ${isMine ? '<span class="tag-pill" style="border-color:var(--accent);color:var(--accent)">YOU</span>' : ''}
-                  </div>
-                  <div class="row">
-                    <select class="select" data-team-role="${t.id}" style="width:auto;padding:3px 7px;font-size:11px">
-                      ${['hider', 'seeker', 'runner', 'chaser', 'north', 'south', 'racer', 'team']
-                        .map((r) => `<option value="${r}" ${t.role === r ? 'selected' : ''}>${r.toUpperCase()}</option>`)
-                        .join('')}
-                    </select>
-                    ${!isMine ? `<button class="btn btn-xs btn-ghost" data-join-team="${t.id}">Join</button>` : ''}
-                    <button class="btn btn-xs btn-ghost" data-edit-team="${t.id}" title="Rename team">${icon('edit', 12)}</button>
-                  </div>
-                </div>
-                <div class="team-stat-row">
-                  ${s.game.rules.economy ? `<span class="stat-pill">${t.coins} coins</span>` : ''}
-                  <span class="stat-pill">${t.points + (rrScore?.totalScore || 0)} pts</span>
-                  ${rrScore ? `<span class="stat-pill">${rrScore.stations} stops</span>` : ''}
-                  <span class="muted" style="font-size:11.5px">${members.length ? members.map((m) => esc(m.name)).join(', ') : 'No players'}</span>
-                </div>
-                ${vetoRem > 0 ? `<div class="sp-badge" style="border-color:#ef4444;color:#f87171">Veto Cooldown: <span data-countdown-until="${t.vetoEndsAt}">${formatClock(vetoRem)}</span></div>` : ''}
-                ${t.doubleNext ? `<div class="sp-badge" style="border-color:#F99D1C;color:#F99D1C">2X Double Next Challenge Active</div>` : ''}
-                <div class="row">
-                  <button class="btn btn-xs btn-ghost" data-pts-delta="${t.id}:1">+1 pt</button>
-                  <button class="btn btn-xs btn-ghost" data-pts-delta="${t.id}:-1">-1 pt</button>
-                  ${s.game.rules.economy ? `<button class="btn btn-xs btn-ghost" data-coins-delta="${t.id}:250">+250 coins</button><button class="btn btn-xs btn-ghost" data-coins-delta="${t.id}:-250">-250 coins</button>` : ''}
-                </div>
-              </div>
-            `;
-          })
-          .join('')}
-      </div>
-    `;
-
-    // === MODE MODULE: HIDE + SEEK ===
+    // 2. ACTIVE MODE HQ RIGHT UP TOP (Most used controls during live play!)
     if (s.game.rules.hideSeekQA) {
       const cats = ['Radar', 'Thermometer', 'Matching', 'Measuring', 'Tentacles', 'Photo'];
       const qList = s.decks.questions.filter((q) => q.category === this.qaCategoryFilter);
@@ -599,18 +857,18 @@ class JetLagSydneyApp {
         <div class="card">
           <div class="card-header">
             <div class="card-title">Hide + Seek HQ</div>
-            <select id="hs-radius-select" class="select" style="width:auto;padding:4px 7px;font-size:11.5px">
+            <select id="hs-radius-select" class="select" style="width:auto;padding:4px 8px;font-size:12px">
               ${[500, 800, 1000, 1500, 2000].map((r) => `<option value="${r}" ${s.game.hidingRadiusM === r ? 'selected' : ''}>Zone: ${r}m</option>`).join('')}
             </select>
           </div>
           <div class="row">
-            <button class="btn btn-accent btn-sm" id="btn-hs-set-nearest" style="flex:1">${icon('pin', 13)} Set Hiding Zone at Nearest Stop</button>
-            ${hz ? `<button class="btn btn-secondary btn-sm" id="btn-hs-reveal">${hz.revealed ? 'Hide Zone' : 'Reveal Zone'}</button>` : ''}
+            <button class="btn btn-accent btn-sm" id="btn-hs-set-nearest" style="flex:1">${icon('pin', 13)} Set Zone at Nearest Stop</button>
+            ${hz ? `<button class="btn btn-secondary btn-sm" id="btn-hs-reveal">${hz.revealed ? 'Hide Zone' : 'Reveal'}</button>` : ''}
           </div>
-          ${canSeeHz ? `<div class="sp-badge" style="border-color:#168388;color:#2dd4bf">Hiding Zone: ${esc(hz.stationName)} (${hz.radiusM}m) ${hz.revealed ? '— REVEALED TO ALL' : '— Hidden from Seekers'}</div>` : `<div class="muted">Tap any station on the map and choose "Set Hiding Zone Here" (kept hidden from Seekers).</div>`}
+          ${canSeeHz ? `<div class="sp-badge" style="border-color:#168388;color:#2dd4bf">Hiding Zone: ${esc(hz.stationName)} (${hz.radiusM}m) ${hz.revealed ? '— REVEALED' : '— Private'}</div>` : ''}
 
           <div style="border-top:1px solid var(--border);padding-top:9px;display:flex;flex-direction:column;gap:8px">
-            <div class="card-title" style="font-size:13px">Seeker Question Deck</div>
+            <div class="card-title" style="font-size:13px">Question Deck</div>
             <div class="row" style="gap:4px">
               ${cats.map((c) => `<button class="btn btn-xs ${this.qaCategoryFilter === c ? 'btn-primary' : 'btn-ghost'}" data-qa-cat="${c}">${c}</button>`).join('')}
             </div>
@@ -626,7 +884,7 @@ class JetLagSydneyApp {
                     <div class="muted" style="font-size:11.5px">${esc(q.prompt)}</div>
                     <div class="row">
                       <button class="btn btn-xs btn-primary" data-ask-q="${q.id}">Ask Hider</button>
-                      ${q.mapAction === 'radar' ? `<button class="btn btn-xs btn-secondary" data-q-radar="${q.radiusKm}">${icon('radar', 12)} Draw ${q.radiusKm}km Radar</button>` : ''}
+                      ${q.mapAction === 'radar' ? `<button class="btn btn-xs btn-secondary" data-q-radar="${q.radiusKm}">${icon('radar', 12)} Draw ${q.radiusKm}km</button>` : ''}
                       ${q.mapAction === 'thermometer' ? `<button class="btn btn-xs btn-secondary" data-q-thermo="1">${icon('thermometer', 12)} Plot Bisector</button>` : ''}
                     </div>
                   </div>`
@@ -643,7 +901,7 @@ class JetLagSydneyApp {
               ${s.qaLog
                 .slice()
                 .reverse()
-                .slice(0, 8)
+                .slice(0, 6)
                 .map(
                   (qa) => `
                   <div class="feed-item qa">
@@ -651,16 +909,15 @@ class JetLagSydneyApp {
                       <strong>${esc(qa.title)}</strong>
                       <span class="muted" style="font-size:10.5px">${esc(qa.askedBy)}</span>
                     </div>
-                    <div class="muted" style="font-size:11.5px">${esc(qa.prompt)}</div>
                     ${
                       qa.answer
-                        ? `<div style="font-size:12.5px;color:#38bdf8;font-weight:700">Answer (${esc(qa.answeredBy)}): ${esc(qa.answer)}</div>`
+                        ? `<div style="font-size:12.5px;color:#38bdf8;font-weight:700">${esc(qa.answeredBy)}: ${esc(qa.answer)}</div>`
                         : `<div class="row">
-                            <button class="btn btn-xs btn-primary" data-ans-qa="${qa.id}:YES (HIT)">YES / HIT</button>
-                            <button class="btn btn-xs btn-danger" data-ans-qa="${qa.id}:NO (MISS)">NO / MISS</button>
+                            <button class="btn btn-xs btn-primary" data-ans-qa="${qa.id}:YES (HIT)">YES</button>
+                            <button class="btn btn-xs btn-danger" data-ans-qa="${qa.id}:NO (MISS)">NO</button>
                             <button class="btn btn-xs btn-secondary" data-ans-qa="${qa.id}:HOTTER">HOTTER</button>
                             <button class="btn btn-xs btn-secondary" data-ans-qa="${qa.id}:COLDER">COLDER</button>
-                            <button class="btn btn-xs btn-ghost" data-ans-custom="${qa.id}">Custom...</button>
+                            <button class="btn btn-xs btn-ghost" data-ans-custom="${qa.id}">Reply</button>
                           </div>`
                     }
                   </div>`
@@ -673,7 +930,6 @@ class JetLagSydneyApp {
       `;
     }
 
-    // === MODE MODULE: TAG / TRANSIT BURN & WIN SECTORS ===
     if (s.game.rules.transitCosts || s.game.rules.winSectors) {
       const burn = s.activeTransitBurn;
       html += `<div class="card">
@@ -689,7 +945,7 @@ class JetLagSydneyApp {
                 <button class="btn btn-danger btn-sm" id="btn-stop-burn">Tap Off & Deduct Coins</button>
               `
               : `
-                <div class="muted" style="font-size:11.5px">Tap onto a transit mode to track real-time Tag coin cost:</div>
+                <div class="muted" style="font-size:11.5px">Tap onto transit to track live coin burn:</div>
                 <div class="row">
                   ${TRANSIT_RATES.map(
                     (tr) => `<button class="btn btn-xs btn-secondary" data-start-burn="${tr.mode}" style="border-color:${tr.color}">${tr.mode.replace('_', ' ').toUpperCase()} (${tr.coinsPerMin}/m)</button>`
@@ -703,12 +959,12 @@ class JetLagSydneyApp {
             ? `
               <div style="border-top:1px solid var(--border);padding-top:9px;display:flex;flex-direction:column;gap:8px">
                 <div class="row-between">
-                  <strong style="font-size:12.5px">Win Sectors (Origin: ${esc(s.winSectors.centerName)})</strong>
+                  <strong style="font-size:12.5px">Win Sectors (${esc(s.winSectors.centerName)})</strong>
                   <span class="muted">${s.winSectors.count} slices</span>
                 </div>
                 <div class="grid-2">
                   <div class="field">
-                    <label>Sector Count</label>
+                    <label>Sectors</label>
                     <select id="ws-count" class="select">
                       ${[2, 3, 4].map((n) => `<option value="${n}" ${s.winSectors.count === n ? 'selected' : ''}>${n} Sectors</option>`).join('')}
                     </select>
@@ -725,7 +981,6 @@ class JetLagSydneyApp {
       </div>`;
     }
 
-    // === MODE MODULE: RAIL RUSH ===
     if (s.game.rules.stationClaiming) {
       const { teamStats, lineProgress } = rrData;
       const activeLines = lineProgress.filter((l) => l.total > 0);
@@ -750,7 +1005,7 @@ class JetLagSydneyApp {
               })
               .join('')}
           </div>
-          <div style="max-height:230px;overflow-y:auto;padding-right:4px">
+          <div style="max-height:220px;overflow-y:auto;padding-right:4px">
             ${activeLines
               .map((lp) => {
                 const claimedTotal = Object.values(lp.byTeam).reduce((a, b) => a + b, 0);
@@ -780,7 +1035,6 @@ class JetLagSydneyApp {
       `;
     }
 
-    // === MODE MODULE: CAPTURE THE FLAG ===
     if (s.game.rules.flags || s.game.rules.dividingLine) {
       const mySide =
         myPlayer?.lat != null && s.game.rules.dividingLine
@@ -794,7 +1048,7 @@ class JetLagSydneyApp {
             s.game.rules.dividingLine
               ? `
                 <div class="field">
-                  <label>Territory Dividing Line</label>
+                  <label>Dividing Line</label>
                   <select id="ctf-preset-select" class="select">
                     ${CTF_PRESETS.map((p) => `<option value="${p.id}" ${s.dividingLine.id === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
                   </select>
@@ -802,7 +1056,7 @@ class JetLagSydneyApp {
                 ${
                   mySide
                     ? `<div class="sp-badge" style="border-color:#f59e0b;color:#fbbf24">Current Territory: <strong>${esc(mySide === 'A' ? s.dividingLine.sideALabel : s.dividingLine.sideBLabel)}</strong></div>`
-                    : `<div class="muted" style="font-size:11.5px">Enable GPS to see live territory side detection across Sydney Harbour and the Parramatta River.</div>`
+                    : ''
                 }
               `
               : ''
@@ -810,7 +1064,6 @@ class JetLagSydneyApp {
           ${
             s.game.rules.flags
               ? `
-                <div class="muted" style="font-size:11.5px">Tap any station on the map and choose "Drop Flag" to place team flags.</div>
                 ${
                   s.flags.length
                     ? s.flags
@@ -840,11 +1093,10 @@ class JetLagSydneyApp {
       `;
     }
 
-    // === MODE MODULE: RACE ACROSS SYDNEY ===
     if (s.game.rules.checkpoints) {
       html += `
         <div class="card">
-          <div class="card-title">Race Across Sydney Checkpoints</div>
+          <div class="card-title">Race Checkpoints</div>
           <div class="row">
             <select id="race-preset-select" class="select" style="flex:1">
               <option value="">Load a Sydney Race Preset...</option>
@@ -875,17 +1127,107 @@ class JetLagSydneyApp {
                       </div>`;
                   })
                   .join('')
-              : `<div class="muted">Load a preset above or tap any station on the map and select "+ Add Checkpoint".</div>`
+              : `<div class="muted">Load a preset above or tap any station on the map to add checkpoints.</div>`
           }
         </div>
       `;
     }
+
+    // 3. Teams & Scoreboard
+    html += `
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Teams & Scoreboard</div>
+          <div class="row" style="gap:5px">
+            ${!isHostGm ? `<button class="btn btn-xs btn-ghost" id="btn-gm-enter">Host Event (GM)</button>` : ''}
+            <button class="btn btn-xs btn-secondary" id="btn-add-team">+ Add Team</button>
+          </div>
+        </div>
+        ${s.teams
+          .map((t) => {
+            const isMine = !isHostGm && myTeam?.id === t.id;
+            const members = Object.values(s.players).filter((p) => !p.isEventHost && p.teamId === t.id);
+            const vetoRem = (t.vetoEndsAt || 0) - Date.now();
+            const rrScore = rrData?.teamStats?.[t.id];
+            return `
+              <div class="team-card" style="--tcol:${t.color}">
+                <div class="row-between">
+                  <div class="row">
+                    <strong style="font-family:var(--font-display)">${esc(t.name)}</strong>
+                    ${isMine ? '<span class="tag-pill" style="border-color:var(--accent);color:var(--accent)">YOU</span>' : ''}
+                  </div>
+                  <div class="row">
+                    <select class="select" data-team-role="${t.id}" style="width:auto;padding:3px 7px;font-size:11px">
+                      ${['hider', 'seeker', 'runner', 'chaser', 'north', 'south', 'racer', 'team']
+                        .map((r) => `<option value="${r}" ${t.role === r ? 'selected' : ''}>${r.toUpperCase()}</option>`)
+                        .join('')}
+                    </select>
+                    ${!isMine && !isHostGm ? `<button class="btn btn-xs btn-ghost" data-join-team="${t.id}">Join</button>` : ''}
+                    <button class="btn btn-xs btn-ghost" data-edit-team="${t.id}" title="Rename team">${icon('edit', 12)}</button>
+                  </div>
+                </div>
+                <div class="team-stat-row">
+                  ${s.game.rules.economy ? `<span class="stat-pill">${t.coins} coins</span>` : ''}
+                  <span class="stat-pill">${t.points + (rrScore?.totalScore || 0)} pts</span>
+                  ${rrScore ? `<span class="stat-pill">${rrScore.stations} stops</span>` : ''}
+                  <span class="muted" style="font-size:11.5px">${members.length ? members.map((m) => esc(m.name)).join(', ') : 'No players'}</span>
+                </div>
+                ${vetoRem > 0 ? `<div class="sp-badge" style="border-color:#ef4444;color:#f87171">Veto Cooldown: <span data-countdown-until="${t.vetoEndsAt}">${formatClock(vetoRem)}</span> ${isHostGm ? `<button class="btn btn-xs btn-ghost" data-gm-clear-veto="${t.id}" style="margin-left:6px">Clear</button>` : ''}</div>` : ''}
+                ${t.doubleNext ? `<div class="sp-badge" style="border-color:#F99D1C;color:#F99D1C">2X Double Next Challenge Active</div>` : ''}
+                <div class="row">
+                  <button class="btn btn-xs btn-ghost" data-pts-delta="${t.id}:1">+1 pt</button>
+                  <button class="btn btn-xs btn-ghost" data-pts-delta="${t.id}:-1">-1 pt</button>
+                  ${s.game.rules.economy ? `<button class="btn btn-xs btn-ghost" data-coins-delta="${t.id}:250">+250</button><button class="btn btn-xs btn-ghost" data-coins-delta="${t.id}:-250">-250</button>` : ''}
+                </div>
+              </div>
+            `;
+          })
+          .join('')}
+      </div>
+    `;
 
     pane.innerHTML = html;
     this.bindGamePaneEvents(pane);
   }
 
   bindGamePaneEvents(pane) {
+    pane.querySelector('#btn-game-open-sched')?.addEventListener('click', () => this.switchTab('live'));
+    pane.querySelector('#btn-gm-enter')?.addEventListener('click', () => this.setEventHostMode(true));
+    pane.querySelector('#btn-gm-exit')?.addEventListener('click', () => this.setEventHostMode(false));
+
+    const sendBroadcast = () => {
+      const inp = pane.querySelector('#gm-broadcast-input');
+      const text = inp?.value.trim();
+      if (!text) return;
+      store.addFeed({
+        type: 'broadcast',
+        author: `${store.getLocalPlayer()?.name || 'Host'} (HOST)`,
+        teamId: null,
+        text
+      });
+      inp.value = '';
+      this.toast('Announcement broadcasted to all players.');
+    };
+    pane.querySelector('#btn-gm-broadcast')?.addEventListener('click', sendBroadcast);
+    pane.querySelector('#gm-broadcast-input')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') sendBroadcast();
+    });
+
+    pane.querySelectorAll('[data-gm-clear-veto]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        store.mutate((s) => {
+          const t = s.teams.find((x) => x.id === btn.dataset.gmClearVeto);
+          if (t) t.vetoEndsAt = 0;
+        }, 'teams');
+        this.toast('Cleared team veto cooldown.');
+      });
+    });
+
+    pane.querySelector('#btn-toggle-modes')?.addEventListener('click', () => {
+      this.showModePicker = !this.showModePicker;
+      this.renderGamePane();
+    });
+
     pane.querySelector('#btn-toggle-rules')?.addEventListener('click', () => {
       this.showRulesConfig = !this.showRulesConfig;
       this.renderGamePane();
@@ -919,6 +1261,7 @@ class JetLagSydneyApp {
       btn.addEventListener('click', () => {
         const modeId = btn.dataset.pickMode;
         const m = GAME_MODES[modeId];
+        this.showModePicker = false;
         store.mutate((s) => {
           s.game.mode = modeId;
           s.game.rules = getDefaultRulesForMode(modeId);
@@ -1064,8 +1407,8 @@ class JetLagSydneyApp {
             category: q.category,
             title: q.title,
             prompt: q.prompt,
-            askedBy: p.name,
-            askedTeamId: t.id,
+            askedBy: p.isEventHost ? `${p.name} (HOST)` : p.name,
+            askedTeamId: t?.id || null,
             askedAt: Date.now(),
             answer: null,
             answeredBy: null,
@@ -1085,6 +1428,7 @@ class JetLagSydneyApp {
           this.openRadarModal(p.lat, p.lng, 'My GPS', km);
         } else {
           this.selectMapTool('radar');
+          if (window.innerWidth <= 920) document.getElementById('side-panel').classList.remove('mobile-open');
           this.toast(`Tap anywhere on the map to place your ${km} km Radar.`);
         }
       });
@@ -1116,10 +1460,11 @@ class JetLagSydneyApp {
       btn.addEventListener('click', () => {
         const tr = TRANSIT_RATES.find((r) => r.mode === btn.dataset.startBurn);
         if (!tr) return;
+        const targetTeam = this.getActionTeam();
         store.mutate((s) => {
-          s.activeTransitBurn = { ...tr, startedAt: Date.now(), teamId: store.getLocalTeam().id };
+          s.activeTransitBurn = { ...tr, startedAt: Date.now(), teamId: targetTeam.id };
         }, 'burn');
-        store.addFeed({ type: 'system', text: `tapped onto ${tr.label} (${tr.coinsPerMin} coins/min).` });
+        store.addFeed({ type: 'system', text: `tapped onto ${tr.label} for ${targetTeam.name} (${tr.coinsPerMin} coins/min).` });
       });
     });
 
@@ -1160,7 +1505,9 @@ class JetLagSydneyApp {
     pane.querySelectorAll('[data-isolate-line]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const code = this.mapCtrl.toggleIsolateLine(btn.dataset.isolateLine);
+        this.updateIsolatedPill();
         this.toast(code ? `Highlighting ${code}` : 'Showing all Sydney lines');
+        if (code && window.innerWidth <= 920) document.getElementById('side-panel').classList.remove('mobile-open');
       });
     });
 
@@ -1219,7 +1566,10 @@ class JetLagSydneyApp {
     });
 
     pane.querySelectorAll('[data-fly-cp]').forEach((btn) => {
-      btn.addEventListener('click', () => this.mapCtrl.flyToStation(btn.dataset.flyCp));
+      btn.addEventListener('click', () => {
+        this.mapCtrl.flyToStation(btn.dataset.flyCp);
+        if (window.innerWidth <= 920) document.getElementById('side-panel').classList.remove('mobile-open');
+      });
     });
     pane.querySelectorAll('[data-toggle-cp]').forEach((btn) => {
       btn.addEventListener('click', () => this.toggleCheckpointDone(btn.dataset.toggleCp));
@@ -1232,25 +1582,52 @@ class JetLagSydneyApp {
   }
 
   // ===== GAME ACTION HELPERS =====
-  toggleStationClaim(station, claim) {
-    const myTeam = store.getLocalTeam();
+  setEventHostMode(enabled) {
+    if (enabled && store.get().room.shareGps) {
+      this.mp.stopGps();
+    }
+    store.mutate((s) => {
+      const p = s.players[s.localPlayerId];
+      if (!p) return;
+      p.isEventHost = Boolean(enabled);
+      if (enabled) {
+        p.teamId = null;
+        p.gpsHidden = true;
+      } else {
+        const firstTeam = s.teams[0];
+        p.teamId = firstTeam?.id || 'team-a';
+        p.color = firstTeam?.color || '#F99D1C';
+        p.gpsHidden = false;
+      }
+    }, 'profile');
+    this.toast(enabled ? 'Switched to Event Host (Non-Playing GM) mode.' : 'Switched back to Playing mode.');
+  }
+
+  getActionTeam(overrideTeamId = null) {
+    const s = store.get();
+    if (overrideTeamId) return s.teams.find((t) => t.id === overrideTeamId) || s.teams[0];
+    return store.getLocalTeam() || s.teams[0];
+  }
+
+  toggleStationClaim(station, claim, overrideTeamId = null) {
+    const targetTeam = this.getActionTeam(overrideTeamId);
     const myPlayer = store.getLocalPlayer();
     store.mutate((s) => {
-      if (claim) {
-        s.claimedStations[station.id] = { teamId: myTeam.id, playerId: myPlayer.id, playerName: myPlayer.name, claimedAt: Date.now() };
+      if (claim && targetTeam) {
+        s.claimedStations[station.id] = { teamId: targetTeam.id, playerId: myPlayer.id, playerName: myPlayer.name, claimedAt: Date.now() };
       } else {
         delete s.claimedStations[station.id];
       }
     }, 'claim');
     store.addFeed({
       type: 'challenge',
-      text: claim ? `claimed ${station.name} (${station.lines.join(', ')}) for ${myTeam.name}.` : `released claim on ${station.name}.`
+      text: claim ? `claimed ${station.name} (${station.lines.join(', ')}) for ${targetTeam.name}.` : `released claim on ${station.name}.`
     });
-    this.toast(claim ? `Claimed ${station.name}` : `Unclaimed ${station.name}`);
+    this.toast(claim ? `Claimed ${station.name} for ${targetTeam.name}` : `Unclaimed ${station.name}`);
   }
 
   setHidingZoneAt(station) {
-    const myTeam = store.getLocalTeam();
+    const myTeam = this.getActionTeam();
     const radiusM = store.get().game.hidingRadiusM || 500;
     store.mutate((s) => {
       s.hidingZone = {
@@ -1259,27 +1636,27 @@ class JetLagSydneyApp {
         radiusM,
         stationId: station.id,
         stationName: station.name,
-        setByTeamId: myTeam.id,
+        setByTeamId: myTeam?.id || null,
         revealed: false
       };
     }, 'hideseek');
-    this.toast(`Hiding Zone locked at ${station.name} (${radiusM}m) — hidden from Seekers.`);
+    this.toast(`Hiding Zone locked at ${station.name} (${radiusM}m).`);
   }
 
-  dropFlagAt(station) {
-    const myTeam = store.getLocalTeam();
+  dropFlagAt(station, overrideTeamId = null) {
+    const targetTeam = this.getActionTeam(overrideTeamId);
     store.mutate((s) => {
       s.flags.push({
         id: uid('flg'),
-        label: `${myTeam.name} @ ${station.name}`,
-        teamId: myTeam.id,
+        label: `${targetTeam.name} @ ${station.name}`,
+        teamId: targetTeam.id,
         status: 'base',
         stationId: station.id,
         lat: station.lat,
         lng: station.lng
       });
     }, 'ctf');
-    store.addFeed({ type: 'system', text: `placed a flag for ${myTeam.name} at ${station.name}.` });
+    store.addFeed({ type: 'system', text: `placed a flag for ${targetTeam.name} at ${station.name}.` });
   }
 
   addCheckpoint(station) {
@@ -1298,7 +1675,7 @@ class JetLagSydneyApp {
   }
 
   toggleCheckpointDone(cpId) {
-    const myTeam = store.getLocalTeam();
+    const myTeam = this.getActionTeam();
     let cpName = '';
     let nowDone = false;
     store.mutate((s) => {
@@ -1331,7 +1708,7 @@ class JetLagSydneyApp {
     store.addFeed({ type: 'qa', text: `answered [${title}]: ${answer}` });
   }
 
-  // ===== TAB 2: WHEEL, ACTIVE CARD, CURSES & DECK BUILDER =====
+  // ===== TAB 2: WHEEL, POWERUP SHOP & DECK BUILDER =====
   refreshWheelPool() {
     const s = store.get();
     document.getElementById('wheel-type-challenges').className = `btn btn-xs ${this.wheelMode === 'challenges' ? 'btn-primary' : 'btn-ghost'}`;
@@ -1358,15 +1735,15 @@ class JetLagSydneyApp {
     const row = document.getElementById('wheel-filter-row');
     if (!row) return;
     if (this.wheelMode === 'curses') {
-      row.innerHTML = `<span class="muted">Spinning active Sydney Curse Deck (${store.get().decks.curses.filter((c) => c.active).length} active curses)</span>`;
+      row.innerHTML = `<span class="muted">Active Sydney Curse Deck (${store.get().decks.curses.filter((c) => c.active).length} active)</span>`;
       return;
     }
     row.innerHTML = `
-      <select id="wheel-cat-sel" class="select" style="flex:1;padding:5px 8px;font-size:12px">
+      <select id="wheel-cat-sel" class="select" style="flex:1;padding:6px 8px;font-size:12.5px">
         <option value="all">All Categories</option>
         ${CHALLENGE_CATEGORIES.map((c) => `<option value="${c.id}" ${this.wheelCat === c.id ? 'selected' : ''}>${c.label}</option>`).join('')}
       </select>
-      <select id="wheel-diff-sel" class="select" style="width:110px;padding:5px 8px;font-size:12px">
+      <select id="wheel-diff-sel" class="select" style="width:110px;padding:6px 8px;font-size:12.5px">
         <option value="all">Any Diff</option>
         ${['Easy', 'Medium', 'Hard'].map((d) => `<option value="${d}" ${this.wheelDiff === d ? 'selected' : ''}>${d}</option>`).join('')}
       </select>
@@ -1384,12 +1761,30 @@ class JetLagSydneyApp {
   renderWheelLanded() {
     const slot = document.getElementById('wheel-landed-slot');
     if (!slot) return;
+    const s = store.get();
     const card = this.landedCard;
+
+    // Show clean empty-state prompt when user hasn't created any custom challenges yet
+    if (!card && this.wheelMode === 'challenges' && s.decks.challenges.length === 0) {
+      slot.innerHTML = `
+        <div class="empty-box">
+          <strong style="font-family:var(--font-display);font-size:15px">Your Challenge Deck is Empty</strong>
+          <div class="muted">Create your own custom challenges to load onto the wheel.</div>
+          <button class="btn btn-primary btn-sm" id="btn-empty-create-challenge">${icon('plus', 14)} Create Your First Challenge</button>
+        </div>
+      `;
+      slot.querySelector('#btn-empty-create-challenge')?.addEventListener('click', () => {
+        this.openAddCardModal('challenge');
+      });
+      return;
+    }
+
     if (!card) {
       slot.innerHTML = '';
       return;
     }
-    const myTeam = store.getLocalTeam();
+    const isHostGm = Boolean(store.getLocalPlayer()?.isEventHost);
+    const myTeam = this.getActionTeam(this.hostTargetTeamId);
     const isCurse = card.wheelMode === 'curses';
     const reward = isCurse ? card.cost : myTeam?.doubleNext ? card.coins * 2 : card.coins;
 
@@ -1402,18 +1797,28 @@ class JetLagSydneyApp {
         <h3>${esc(card.title)}</h3>
         <p class="muted" style="color:var(--text)">${esc(card.description)}</p>
         ${
+          isHostGm
+            ? `<div class="field">
+                <label>Apply to Team (Event Host)</label>
+                <select id="gm-wheel-team" class="select" style="padding:6px 8px;font-size:12.5px">
+                  ${s.teams.map((t) => `<option value="${t.id}" ${myTeam?.id === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
+                </select>
+              </div>`
+            : ''
+        }
+        ${
           isCurse
             ? `
-              <div class="muted" style="font-size:11.5px">Duration: ${card.durationMins}m · Condition: ${esc(card.castingCondition || 'Standard')}</div>
+              <div class="muted" style="font-size:11.5px">Duration: ${card.durationMins}m · ${esc(card.castingCondition || 'Standard')}</div>
               <div class="row">
-                <button class="btn btn-danger btn-sm" id="btn-cast-landed-curse" style="flex:1">Cast on Opponent</button>
+                <button class="btn btn-danger btn-sm" id="btn-cast-landed-curse" style="flex:1">${isHostGm ? `Cast on ${esc(myTeam?.name || 'Team')}` : 'Cast on Opponent'}</button>
                 <button class="btn btn-ghost btn-sm" id="btn-dismiss-landed">Dismiss</button>
               </div>
             `
             : `
               <div class="muted" style="font-size:11.5px">Veto Penalty: ${card.vetoMins} mins ${myTeam?.doubleNext ? '· 2X DOUBLE ACTIVE' : ''}</div>
               <div class="row">
-                <button class="btn btn-primary btn-sm" id="btn-accept-landed" style="flex:1">Accept</button>
+                <button class="btn btn-primary btn-sm" id="btn-accept-landed" style="flex:1">${isHostGm ? 'Assign' : 'Accept'}</button>
                 <button class="btn btn-accent btn-sm" id="btn-complete-landed">Complete</button>
                 <button class="btn btn-danger btn-sm" id="btn-veto-landed">Veto (${card.vetoMins}m)</button>
               </div>
@@ -1422,35 +1827,36 @@ class JetLagSydneyApp {
       </div>
     `;
 
+    slot.querySelector('#gm-wheel-team')?.addEventListener('change', (e) => {
+      this.hostTargetTeamId = e.target.value;
+      this.renderWheelLanded();
+    });
     slot.querySelector('#btn-dismiss-landed')?.addEventListener('click', () => {
       this.landedCard = null;
       this.renderWheelLanded();
     });
-
     slot.querySelector('#btn-accept-landed')?.addEventListener('click', () => {
-      store.mutate((s) => {
-        const t = s.teams.find((x) => x.id === myTeam.id);
+      const target = this.getActionTeam(this.hostTargetTeamId);
+      store.mutate((st) => {
+        const t = st.teams.find((x) => x.id === target.id);
         if (t) t.activeChallenge = { ...card, acceptedAt: Date.now() };
       }, 'challenge');
-      store.addFeed({ type: 'challenge', text: `accepted challenge: "${card.title}" (+${reward} coins).` });
+      store.addFeed({ type: 'challenge', text: isHostGm ? `assigned "${card.title}" (+${reward} coins) to ${target.name}.` : `accepted challenge: "${card.title}" (+${reward} coins).` });
       this.landedCard = null;
       this.renderWheelLanded();
     });
-
     slot.querySelector('#btn-complete-landed')?.addEventListener('click', () => {
-      this.completeChallengeCard(card);
+      this.completeChallengeCard(card, isHostGm ? this.hostTargetTeamId : null);
       this.landedCard = null;
       this.renderWheelLanded();
     });
-
     slot.querySelector('#btn-veto-landed')?.addEventListener('click', () => {
-      this.vetoChallengeCard(card);
+      this.vetoChallengeCard(card, isHostGm ? this.hostTargetTeamId : null);
       this.landedCard = null;
       this.renderWheelLanded();
     });
-
     slot.querySelector('#btn-cast-landed-curse')?.addEventListener('click', () => {
-      this.castCurse(card);
+      this.castCurse(card, isHostGm ? this.hostTargetTeamId : null);
       this.landedCard = null;
       this.renderWheelLanded();
     });
@@ -1460,6 +1866,7 @@ class JetLagSydneyApp {
     const s = store.get();
     const myTeam = store.getLocalTeam();
 
+    // Active Challenge
     const acSlot = document.getElementById('active-challenge-slot');
     if (acSlot) {
       const ac = myTeam?.activeChallenge;
@@ -1486,6 +1893,7 @@ class JetLagSydneyApp {
       }
     }
 
+    // Active Curses
     const cuSlot = document.getElementById('active-curses-slot');
     if (cuSlot) {
       const liveCurses = (s.activeCurses || []).filter((c) => c.expiresAt > Date.now());
@@ -1516,92 +1924,248 @@ class JetLagSydneyApp {
       });
     }
 
-    const dbSlot = document.getElementById('deck-builder-slot');
-    if (dbSlot) {
-      dbSlot.innerHTML = `
+    // Powerup Shop Sub-view
+    const shopSlot = document.getElementById('wsub-shop');
+    if (shopSlot) {
+      const shopTeam = this.getActionTeam(this.hostTargetTeamId);
+      const isHostGm = Boolean(store.getLocalPlayer()?.isEventHost);
+      shopSlot.innerHTML = `
         <div class="card">
           <div class="card-header">
-            <div class="card-title">Custom Deck Builder</div>
-            <button class="btn btn-xs btn-secondary" id="btn-toggle-deck-builder">${this.showDeckBuilder ? 'Collapse' : `Edit (${s.decks.challenges.length})`}</button>
+            <div class="card-title">Powerup Shop</div>
+            <span class="stat-pill" style="color:var(--accent)">${esc(shopTeam.name)}: ${shopTeam.coins} coins</span>
           </div>
           ${
-            this.showDeckBuilder
-              ? `
-                <div class="row">
-                  <button class="btn btn-xs btn-primary" id="btn-new-challenge">+ Add Challenge</button>
-                  <button class="btn btn-xs btn-accent" id="btn-new-curse">+ Add Curse</button>
-                  <button class="btn btn-xs btn-secondary" id="btn-export-deck">Export JSON</button>
-                  <button class="btn btn-xs btn-secondary" id="btn-import-deck">Import</button>
-                  <button class="btn btn-xs btn-ghost" id="btn-reset-deck">Defaults</button>
-                </div>
-                <div style="max-height:260px;overflow-y:auto;display:flex;flex-direction:column;gap:5px">
-                  ${s.decks.challenges
+            isHostGm
+              ? `<div class="field">
+                  <label>Team Buying Powerup (Event Host)</label>
+                  <select id="gm-shop-team" class="select" style="padding:6px 8px;font-size:12.5px">
+                    ${s.teams.map((t) => `<option value="${t.id}" ${shopTeam.id === t.id ? 'selected' : ''}>${esc(t.name)} (${t.coins} coins)</option>`).join('')}
+                  </select>
+                </div>`
+              : ''
+          }
+          ${POWERUPS_SHOP.map(
+            (pw) => `
+            <div class="feed-item">
+              <div class="row-between">
+                <div class="row"><span class="pw-badge">${esc(pw.icon)}</span><strong>${esc(pw.title)}</strong></div>
+                <button class="btn btn-xs btn-primary" data-buy-pw="${pw.id}">${pw.cost} coins</button>
+              </div>
+              <div class="muted" style="font-size:11.5px">${esc(pw.description)}</div>
+            </div>`
+          ).join('')}
+        </div>
+      `;
+      shopSlot.querySelector('#gm-shop-team')?.addEventListener('change', (e) => {
+        this.hostTargetTeamId = e.target.value;
+        this.renderWheelSideSections();
+      });
+      shopSlot.querySelectorAll('[data-buy-pw]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const pw = POWERUPS_SHOP.find((x) => x.id === btn.dataset.buyPw);
+          if (!pw) return;
+          const team = this.getActionTeam(this.hostTargetTeamId);
+          if (team.coins < pw.cost) return this.toast(`Not enough coins. Need ${pw.cost} coins.`);
+          store.mutate((st) => {
+            const t = st.teams.find((x) => x.id === team.id);
+            if (!t) return;
+            t.coins -= pw.cost;
+            if (pw.id === 'pw-double') t.doubleNext = true;
+            if (pw.id === 'pw-veto-shield') t.vetoEndsAt = 0;
+            if (pw.id === 'pw-freeze' && !isHostGm) {
+              const p = st.players[st.localPlayerId];
+              if (p) {
+                p.gpsFrozen = true;
+                p.frozenLat = p.lat;
+                p.frozenLng = p.lng;
+                st.room.freezeEndsAt = Date.now() + 15 * 60000;
+              }
+            }
+          }, 'powerup');
+          store.addFeed({ type: 'system', text: `${team.name} bought powerup: ${pw.title} (-${pw.cost} coins).` });
+          this.toast(`Activated ${pw.title} for ${team.name}.`);
+        });
+      });
+    }
+
+    // Custom Deck Builder Sub-view (Inline Creator + Full Edit/Delete + JSON Sync)
+    const deckSlot = document.getElementById('wsub-deck');
+    if (deckSlot) {
+      const isCh = this.deckKind === 'challenges';
+      const list = isCh ? s.decks.challenges : s.decks.curses;
+      deckSlot.innerHTML = `
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">Create Custom ${isCh ? 'Challenge' : 'Curse'}</div>
+            <div class="row" style="gap:4px">
+              <button class="btn btn-xs ${isCh ? 'btn-primary' : 'btn-ghost'}" data-deck-kind="challenges">Challenges (${s.decks.challenges.length})</button>
+              <button class="btn btn-xs ${!isCh ? 'btn-primary' : 'btn-ghost'}" data-deck-kind="curses">Curses (${s.decks.curses.length})</button>
+            </div>
+          </div>
+          <div class="field">
+            <label>Title</label>
+            <input type="text" id="qc-title" class="input" placeholder="${isCh ? 'e.g. Touch the Water at Manly' : 'e.g. Curse of the Slow Train'}" />
+          </div>
+          <div class="field">
+            <label>Rules / Description</label>
+            <textarea id="qc-desc" class="textarea" placeholder="What do players need to do to complete or prove it?"></textarea>
+          </div>
+          <div class="grid-2">
+            <div class="field">
+              <label>${isCh ? 'Reward (Coins)' : 'Cost (Coins)'}</label>
+              <input type="number" id="qc-coins" class="input" value="500" min="0" step="50" />
+            </div>
+            <div class="field">
+              <label>${isCh ? 'Veto Penalty (Mins)' : 'Duration (Mins)'}</label>
+              <input type="number" id="qc-mins" class="input" value="15" min="1" />
+            </div>
+          </div>
+          ${
+            isCh
+              ? `<div class="grid-2">
+                  <div class="field">
+                    <label>Category</label>
+                    <select id="qc-cat" class="select">${CHALLENGE_CATEGORIES.map((c) => `<option value="${c.id}">${c.label}</option>`).join('')}</select>
+                  </div>
+                  <div class="field">
+                    <label>Difficulty</label>
+                    <select id="qc-diff" class="select"><option>Easy</option><option selected>Medium</option><option>Hard</option></select>
+                  </div>
+                </div>`
+              : `<div class="field">
+                  <label>Casting Condition (Optional)</label>
+                  <input type="text" id="qc-cond" class="input" placeholder="e.g. Pay coin cost / Discard 1 card" value="Pay coin cost" />
+                </div>`
+          }
+          <button class="btn btn-primary btn-block" id="btn-qc-add">${icon('plus', 14)} Add ${isCh ? 'Challenge' : 'Curse'} to Wheel</button>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">${isCh ? 'My Challenges' : 'Curses'} (${list.length})</div>
+            <div class="row" style="gap:4px">
+              <button class="btn btn-xs btn-secondary" id="btn-export-deck">Export</button>
+              <button class="btn btn-xs btn-secondary" id="btn-import-deck">Import</button>
+              ${list.length ? `<button class="btn btn-xs btn-danger" id="btn-clear-deck">Clear All</button>` : ''}
+            </div>
+          </div>
+          ${
+            list.length === 0
+              ? `<div class="muted" style="text-align:center;padding:8px 0">No ${isCh ? 'challenges' : 'curses'} yet. Use the form above to create your own.</div>`
+              : `<div style="display:flex;flex-direction:column;gap:4px">
+                  ${list
                     .map(
                       (c) => `
                       <div class="toggle-row">
-                        <label class="row" style="flex:1;cursor:pointer">
-                          <input type="checkbox" data-toggle-card="challenges:${c.id}" ${c.active ? 'checked' : ''} />
-                          <div>
-                            <div style="font-size:12px;font-weight:700">${esc(c.title)} <span class="muted">(${c.coins} coins)</span></div>
-                            <div class="muted" style="font-size:11px">${esc(c.description.slice(0, 72))}...</div>
+                        <label class="row" style="flex:1;cursor:pointer;min-width:0">
+                          <input type="checkbox" data-toggle-card="${this.deckKind}:${c.id}" ${c.active ? 'checked' : ''} />
+                          <div style="min-width:0">
+                            <div style="font-size:12.5px;font-weight:700">${esc(c.title)} <span class="muted">(${isCh ? `${c.coins} coins` : `${c.cost} coins`})</span></div>
+                            <div class="muted" style="font-size:11px">${esc(c.description.slice(0, 74))}${c.description.length > 74 ? '...' : ''}</div>
                           </div>
                         </label>
-                        <button class="btn btn-xs btn-ghost" data-del-card="challenges:${c.id}" title="Delete card">${icon('trash', 12)}</button>
+                        <div class="row" style="gap:4px;flex-shrink:0">
+                          <button class="btn btn-xs btn-ghost" data-edit-card="${this.deckKind}:${c.id}" title="Edit">${icon('edit', 12)}</button>
+                          <button class="btn btn-xs btn-ghost" data-del-card="${this.deckKind}:${c.id}" title="Delete">${icon('trash', 12)}</button>
+                        </div>
                       </div>`
                     )
                     .join('')}
-                </div>
-              `
-              : `<div class="muted">Add your own Sydney challenges or curses, toggle cards on/off, or export/import custom decks for your group.</div>`
+                </div>`
           }
         </div>
       `;
 
-      dbSlot.querySelector('#btn-toggle-deck-builder')?.addEventListener('click', () => {
-        this.showDeckBuilder = !this.showDeckBuilder;
-        this.renderWheelSideSections();
+      deckSlot.querySelectorAll('[data-deck-kind]').forEach((b) => {
+        b.addEventListener('click', () => {
+          this.deckKind = b.dataset.deckKind;
+          this.renderWheelSideSections();
+        });
       });
 
-      dbSlot.querySelector('#btn-new-challenge')?.addEventListener('click', () => this.openAddCardModal('challenge'));
-      dbSlot.querySelector('#btn-new-curse')?.addEventListener('click', () => this.openAddCardModal('curse'));
-      dbSlot.querySelector('#btn-export-deck')?.addEventListener('click', () => {
+      deckSlot.querySelector('#btn-qc-add')?.addEventListener('click', () => {
+        const title = deckSlot.querySelector('#qc-title').value.trim();
+        const description = deckSlot.querySelector('#qc-desc').value.trim();
+        if (!title) return this.toast('Enter a title for your card.');
+        const coins = Math.max(0, Number(deckSlot.querySelector('#qc-coins').value) || 0);
+        const mins = Math.max(1, Number(deckSlot.querySelector('#qc-mins').value) || 15);
+        store.mutate((st) => {
+          if (isCh) {
+            st.decks.challenges.unshift({
+              id: uid('ch'),
+              title,
+              description: description || 'Complete this challenge and submit proof.',
+              coins,
+              vetoMins: mins,
+              category: deckSlot.querySelector('#qc-cat').value,
+              difficulty: deckSlot.querySelector('#qc-diff').value,
+              active: true
+            });
+          } else {
+            st.decks.curses.unshift({
+              id: uid('cu'),
+              title,
+              description: description || 'Custom curse.',
+              cost: coins,
+              durationMins: mins,
+              castingCondition: deckSlot.querySelector('#qc-cond')?.value.trim() || 'Pay coin cost',
+              active: true
+            });
+          }
+        }, 'deck');
+        this.refreshWheelPool();
+        this.renderWheelLanded();
+        this.toast(`Added "${title}" to your deck.`);
+      });
+
+      deckSlot.querySelector('#btn-export-deck')?.addEventListener('click', () => {
         const blob = new Blob([JSON.stringify(store.get().decks, null, 2)], { type: 'application/json' });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
         a.download = 'jetlag-sydney-decks.json';
         a.click();
       });
-      dbSlot.querySelector('#btn-import-deck')?.addEventListener('click', () => {
+
+      deckSlot.querySelector('#btn-import-deck')?.addEventListener('click', () => {
         const inp = document.createElement('input');
         inp.type = 'file';
         inp.accept = 'application/json';
         inp.onchange = async () => {
           try {
             const data = JSON.parse(await inp.files[0].text());
-            if (!data.challenges) throw new Error('Missing challenges array');
+            if (!Array.isArray(data.challenges)) throw new Error('Missing challenges array');
             store.mutate((st) => {
               st.decks.challenges = data.challenges;
-              if (data.curses) st.decks.curses = data.curses;
+              if (Array.isArray(data.curses)) st.decks.curses = data.curses;
             }, 'deck');
             this.refreshWheelPool();
-            this.toast('Imported custom Sydney deck.');
+            this.renderWheelLanded();
+            this.toast(`Imported ${data.challenges.length} challenges.`);
           } catch {
             this.toast('Invalid deck JSON file.');
           }
         };
         inp.click();
       });
-      dbSlot.querySelector('#btn-reset-deck')?.addEventListener('click', () => {
-        if (confirm('Reset Challenges & Curses back to default Sydney decks?')) {
-          store.mutate((st) => {
-            st.decks.challenges = structuredClone(DEFAULT_CHALLENGES);
-            st.decks.curses = structuredClone(DEFAULT_CURSES);
-          }, 'deck');
+
+      deckSlot.querySelector('#btn-clear-deck')?.addEventListener('click', () => {
+        if (confirm(`Delete all ${isCh ? 'challenges' : 'curses'} in this list?`)) {
+          store.mutate((st) => { st.decks[this.deckKind] = []; }, 'deck');
           this.refreshWheelPool();
+          this.renderWheelLanded();
         }
       });
 
-      dbSlot.querySelectorAll('[data-toggle-card]').forEach((cb) => {
+      deckSlot.querySelectorAll('[data-edit-card]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const [kind, id] = btn.dataset.editCard.split(':');
+          const card = store.get().decks[kind]?.find((x) => x.id === id);
+          if (card) this.openAddCardModal(kind === 'challenges' ? 'challenge' : 'curse', card);
+        });
+      });
+
+      deckSlot.querySelectorAll('[data-toggle-card]').forEach((cb) => {
         cb.addEventListener('change', () => {
           const [kind, id] = cb.dataset.toggleCard.split(':');
           store.mutate((st) => {
@@ -1612,24 +2176,25 @@ class JetLagSydneyApp {
         });
       });
 
-      dbSlot.querySelectorAll('[data-del-card]').forEach((btn) => {
+      deckSlot.querySelectorAll('[data-del-card]').forEach((btn) => {
         btn.addEventListener('click', () => {
           const [kind, id] = btn.dataset.delCard.split(':');
           store.mutate((st) => {
             st.decks[kind] = st.decks[kind].filter((x) => x.id !== id);
           }, 'deck');
           this.refreshWheelPool();
+          this.renderWheelLanded();
         });
       });
     }
   }
 
-  completeChallengeCard(card) {
-    const myTeam = store.getLocalTeam();
-    const mult = myTeam.doubleNext ? 2 : 1;
+  completeChallengeCard(card, overrideTeamId = null) {
+    const targetTeam = this.getActionTeam(overrideTeamId);
+    const mult = targetTeam.doubleNext ? 2 : 1;
     const reward = (card.coins || 500) * mult;
     store.mutate((s) => {
-      const t = s.teams.find((x) => x.id === myTeam.id);
+      const t = s.teams.find((x) => x.id === targetTeam.id);
       if (t) {
         t.coins += reward;
         t.points += 1;
@@ -1639,17 +2204,17 @@ class JetLagSydneyApp {
     }, 'challenge');
     store.addFeed({
       type: 'challenge',
-      text: `COMPLETED "${card.title}" (+${reward} coins, +1 pt${mult === 2 ? ' — 2X DOUBLED' : ''}).`
+      text: `${targetTeam.name} COMPLETED "${card.title}" (+${reward} coins, +1 pt${mult === 2 ? ' — 2X DOUBLED' : ''}).`
     });
-    this.toast(`Completed! +${reward} coins`);
+    this.toast(`Completed for ${targetTeam.name}! +${reward} coins`);
   }
 
-  vetoChallengeCard(card) {
-    const myTeam = store.getLocalTeam();
-    const mult = myTeam.doubleNext ? 2 : 1;
+  vetoChallengeCard(card, overrideTeamId = null) {
+    const targetTeam = this.getActionTeam(overrideTeamId);
+    const mult = targetTeam.doubleNext ? 2 : 1;
     const mins = (card.vetoMins || 15) * mult;
     store.mutate((s) => {
-      const t = s.teams.find((x) => x.id === myTeam.id);
+      const t = s.teams.find((x) => x.id === targetTeam.id);
       if (t) {
         t.vetoEndsAt = Date.now() + mins * 60000;
         t.doubleNext = false;
@@ -1658,27 +2223,32 @@ class JetLagSydneyApp {
     }, 'challenge');
     store.addFeed({
       type: 'challenge',
-      text: `VETOED "${card.title}" — ${mins}-minute veto cooldown started.`
+      text: `${targetTeam.name} VETOED "${card.title}" — ${mins}-minute veto cooldown started.`
     });
-    this.toast(`Vetoed. ${mins}m cooldown active.`);
+    this.toast(`Vetoed (${targetTeam.name}). ${mins}m cooldown active.`);
   }
 
-  castCurse(curse) {
+  castCurse(curse, overrideTargetTeamId = null) {
     const s = store.get();
+    const isHostGm = Boolean(store.getLocalPlayer()?.isEventHost);
     const myTeam = store.getLocalTeam();
-    const opponent = s.teams.find((t) => t.id !== myTeam.id) || myTeam;
-    if (s.game.rules.economy && myTeam.coins < curse.cost) {
+    const opponent = overrideTargetTeamId
+      ? (s.teams.find((t) => t.id === overrideTargetTeamId) || s.teams[0])
+      : (s.teams.find((t) => t.id !== myTeam?.id) || s.teams[0]);
+    if (!isHostGm && myTeam && s.game.rules.economy && myTeam.coins < curse.cost) {
       if (!confirm(`${myTeam.name} only has ${myTeam.coins} coins (Curse costs ${curse.cost}). Cast anyway?`)) return;
     }
     store.mutate((st) => {
-      const t = st.teams.find((x) => x.id === myTeam.id);
-      if (t && st.game.rules.economy) t.coins = Math.max(0, t.coins - (curse.cost || 0));
+      if (!isHostGm && myTeam && st.game.rules.economy) {
+        const t = st.teams.find((x) => x.id === myTeam.id);
+        if (t) t.coins = Math.max(0, t.coins - (curse.cost || 0));
+      }
       st.activeCurses.push({
         id: uid('ac'),
         curseId: curse.id,
         title: curse.title,
         description: curse.description,
-        fromTeamId: myTeam.id,
+        fromTeamId: myTeam?.id || null,
         targetTeamId: opponent.id,
         castAt: Date.now(),
         expiresAt: Date.now() + (curse.durationMins || 15) * 60000
@@ -1688,110 +2258,7 @@ class JetLagSydneyApp {
     this.toast(`Curse cast on ${opponent.name}.`);
   }
 
-  // ===== TAB 3: SHOP & FULL SYDNEY LINE EXPLORER =====
-  renderShopPane() {
-    const pane = document.getElementById('pane-shop');
-    if (!pane) return;
-    const myTeam = store.getLocalTeam();
-    const groups = [
-      { mode: 'train', label: 'Sydney Trains (T1–T9)' },
-      { mode: 'metro', label: 'Sydney Metro (M1)' },
-      { mode: 'light_rail', label: 'Light Rail (L1–L4)' },
-      { mode: 'ferry', label: 'Sydney Ferries (F1–F10)' },
-      { mode: 'intercity', label: 'NSW Intercity (BMT, CCN, SCO, SHL, HUN)' }
-    ];
-
-    pane.innerHTML = `
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Powerup Shop</div>
-          <span class="stat-pill" style="color:var(--accent)">${esc(myTeam.name)}: ${myTeam.coins} coins</span>
-        </div>
-        ${POWERUPS_SHOP.map(
-          (pw) => `
-          <div class="feed-item">
-            <div class="row-between">
-              <div class="row"><span class="pw-badge">${esc(pw.icon)}</span><strong>${esc(pw.title)}</strong></div>
-              <button class="btn btn-xs btn-primary" data-buy-pw="${pw.id}">${pw.cost} coins</button>
-            </div>
-            <div class="muted" style="font-size:11.5px">${esc(pw.description)}</div>
-          </div>`
-        ).join('')}
-      </div>
-
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Sydney Network Line Explorer</div>
-          ${this.mapCtrl.isolatedLine ? `<button class="btn btn-xs btn-secondary" id="btn-show-all-lines">Show All</button>` : `<span class="muted">Tap to isolate</span>`}
-        </div>
-        ${groups
-          .map((g) => {
-            const lines = SYDNEY_NETWORK.lines.filter((l) => l.mode === g.mode);
-            return `
-              <div style="display:flex;flex-direction:column;gap:5px">
-                <div style="font-size:11.5px;font-weight:700;color:var(--text-muted)">${g.label}</div>
-                <div class="line-grid">
-                  ${lines
-                    .map(
-                      (ln) => `
-                      <button class="line-pill ${this.mapCtrl.isolatedLine === ln.code ? 'isolated' : ''}"
-                        data-explore-line="${ln.code}"
-                        style="background:${ln.color};color:${ln.textColor}"
-                        title="${esc(ln.name)} (${ln.stationIds.length} stops)">
-                        ${ln.code} <span style="opacity:0.8;font-weight:600;margin-left:3px;font-size:9.5px">${ln.stationIds.length}</span>
-                      </button>`
-                    )
-                    .join('')}
-                </div>
-              </div>
-            `;
-          })
-          .join('')}
-      </div>
-    `;
-
-    pane.querySelectorAll('[data-buy-pw]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const pw = POWERUPS_SHOP.find((x) => x.id === btn.dataset.buyPw);
-        if (!pw) return;
-        const team = store.getLocalTeam();
-        if (team.coins < pw.cost) return this.toast(`Not enough coins. Need ${pw.cost} coins.`);
-        store.mutate((st) => {
-          const t = st.teams.find((x) => x.id === team.id);
-          if (!t) return;
-          t.coins -= pw.cost;
-          if (pw.id === 'pw-double') t.doubleNext = true;
-          if (pw.id === 'pw-veto-shield') t.vetoEndsAt = 0;
-          if (pw.id === 'pw-freeze') {
-            const p = st.players[st.localPlayerId];
-            if (p) {
-              p.gpsFrozen = true;
-              p.frozenLat = p.lat;
-              p.frozenLng = p.lng;
-              st.room.freezeEndsAt = Date.now() + 15 * 60000;
-            }
-          }
-        }, 'powerup');
-        store.addFeed({ type: 'system', text: `bought powerup: ${pw.title} (-${pw.cost} coins).` });
-        this.toast(`Activated ${pw.title}.`);
-      });
-    });
-
-    pane.querySelectorAll('[data-explore-line]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const iso = this.mapCtrl.toggleIsolateLine(btn.dataset.exploreLine);
-        this.renderShopPane();
-        if (iso && window.innerWidth <= 920) document.getElementById('side-panel').classList.remove('mobile-open');
-      });
-    });
-
-    pane.querySelector('#btn-show-all-lines')?.addEventListener('click', () => {
-      this.mapCtrl.toggleIsolateLine(this.mapCtrl.isolatedLine);
-      this.renderShopPane();
-    });
-  }
-
-  // ===== TAB 4: LIVE ACTIVITY FEED, CHAT & PHOTO PROOFS =====
+  // ===== TAB 3: LIVE ACTIVITY FEED, CHAT & PHOTO PROOFS =====
   renderFeedPane() {
     const pane = document.getElementById('pane-feed');
     if (!pane) return;
@@ -1807,7 +2274,7 @@ class JetLagSydneyApp {
         <div class="row" style="gap:6px">
           <input type="text" id="feed-msg-input" class="input" placeholder="Send message, clue, or proof note..." style="flex:1" />
           <label class="btn btn-secondary btn-sm" title="Attach compressed camera photo proof">
-            ${icon('camera', 14)}
+            ${icon('camera', 15)}
             <input type="file" id="feed-photo-input" accept="image/*" capture="environment" style="display:none" />
           </label>
           <button class="btn btn-primary btn-sm" id="btn-send-feed">Send</button>
@@ -1904,7 +2371,7 @@ class JetLagSydneyApp {
     });
   }
 
-  // ===== TAB 5: MULTIPLAYER LIVE ROOMS, GPS & SYNC =====
+  // ===== TAB 4: MULTIPLAYER LIVE ROOMS, GPS & PREFERENCES =====
   renderLivePane() {
     const pane = document.getElementById('pane-live');
     if (!pane) return;
@@ -1913,46 +2380,159 @@ class JetLagSydneyApp {
     const nearest = me?.lat != null ? this.mapCtrl.findNearestStation(me.lat, me.lng) : null;
     const players = Object.values(s.players || {});
 
+    const sr = s.scheduledRoom;
+    const isLocked = Boolean(sr?.locked);
+    const schedInviteUrl = (() => {
+      if (!sr) return '';
+      const u = new URL(window.location.href);
+      u.search = '';
+      u.searchParams.set('room', sr.roomCode);
+      u.searchParams.set('sched', encodeScheduleParam(sr));
+      return u.toString();
+    })();
+    const myRsvp = Boolean(sr?.rsvps?.some((r) => r.id === s.localPlayerId));
+
     pane.innerHTML = `
-      <div class="card">
-        <div class="card-title">Player Identity & Live GPS</div>
+      <!-- SCHEDULE & LOCK IN GAME ROOM -->
+      <div class="card sched-card ${isLocked ? 'locked' : ''}">
+        <div class="card-header">
+          <div class="card-title">${icon(isLocked ? 'lock' : 'calendar', 15)} ${isLocked ? 'Locked-In Game Room' : 'Schedule a Game Room'}</div>
+          <span class="tag-pill" style="${isLocked ? 'border-color:var(--accent);color:var(--accent)' : ''}">${isLocked ? 'LOCKED IN' : 'PROTOTYPE'}</span>
+        </div>
+        ${
+          isLocked
+            ? `
+              <div style="display:flex;flex-direction:column;gap:4px">
+                <strong style="font-family:var(--font-display);font-size:16px">${esc(sr.title)}</strong>
+                <div class="muted" style="font-size:12px">
+                  ${esc(GAME_MODES[sr.mode]?.name || sr.mode)} · Meet at <strong>${esc(sr.meetingStation)}</strong>
+                </div>
+                <div class="muted" style="font-size:12px">
+                  Start: <strong>${esc(new Date(sr.startTimeIso).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }))}</strong>
+                </div>
+              </div>
+              <div class="sched-countdown" data-sched-iso="${esc(sr.startTimeIso)}">${formatScheduledCountdown(Date.parse(sr.startTimeIso) - Date.now())}</div>
+              <div class="row-between" style="background:var(--bg);padding:8px 10px;border-radius:9px;border:1px solid var(--border)">
+                <span class="muted" style="font-size:11.5px">Reserved Room Code</span>
+                <strong class="mono" style="color:var(--accent);letter-spacing:1.5px">${esc(sr.roomCode)}</strong>
+              </div>
+              <div class="row">
+                <button class="btn ${myRsvp ? 'btn-accent' : 'btn-secondary'} btn-sm" id="btn-sched-rsvp" style="flex:1">
+                  ${icon('check', 13)} ${myRsvp ? 'Locked In (Ready)' : 'Mark Ready'} (${sr.rsvps?.length || 0})
+                </button>
+                <button class="btn btn-primary btn-sm" id="btn-sched-golive" style="flex:1">Launch Room Now</button>
+              </div>
+              ${
+                sr.rsvps?.length
+                  ? `<div class="muted" style="font-size:11.5px">Ready roster: ${sr.rsvps.map((r) => esc(r.name)).join(', ')}</div>`
+                  : ''
+              }
+              <div class="row">
+                <button class="btn btn-secondary btn-xs" id="btn-sched-copy" style="flex:1">${icon('copy', 12)} Copy Invite Link</button>
+                <button class="btn btn-secondary btn-xs" id="btn-sched-ics" style="flex:1">${icon('calendar', 12)} Add to Calendar</button>
+                <button class="btn btn-ghost btn-xs" id="btn-sched-unlock">${icon('unlock', 12)} Unlock</button>
+              </div>
+            `
+            : `
+              <div class="muted" style="font-size:12px">Pick a kickoff time, mode, and Sydney meeting station, then lock it in to generate a countdown & shareable invite link.</div>
+              <div class="field">
+                <label>Session Title</label>
+                <input type="text" id="sched-title" class="input" placeholder="e.g. Saturday Tag Across Sydney" value="${esc(sr?.title || 'Sydney Jet Lag Session')}" />
+              </div>
+              <div class="grid-2">
+                <div class="field">
+                  <label>Game Mode</label>
+                  <select id="sched-mode" class="select">
+                    ${Object.values(GAME_MODES).map((m) => `<option value="${m.id}" ${(sr?.mode || s.game.mode) === m.id ? 'selected' : ''}>${esc(m.shortName)}</option>`).join('')}
+                  </select>
+                </div>
+                <div class="field">
+                  <label>Room Code</label>
+                  <input type="text" id="sched-code" class="input mono" style="text-transform:uppercase" value="${esc(sr?.roomCode || s.room.code || generateRoomCode())}" />
+                </div>
+              </div>
+              <div class="grid-2">
+                <div class="field">
+                  <label>Kickoff Date & Time</label>
+                  <input type="datetime-local" id="sched-time" class="input" value="${esc(sr?.startTimeIso || defaultScheduleDateTime())}" />
+                </div>
+                <div class="field">
+                  <label>Meeting Station</label>
+                  <input type="text" id="sched-station" class="input" placeholder="Central" value="${esc(sr?.meetingStation || 'Central')}" />
+                </div>
+              </div>
+              <label class="toggle-row" style="padding:4px 0">
+                <div>
+                  <div style="font-size:12.5px;font-weight:700">Host as Non-Playing GM</div>
+                  <div class="muted" style="font-size:11px">Run and spectate the event while your friends play</div>
+                </div>
+                <input type="checkbox" id="sched-host-gm" ${(sr ? sr.hostIsSpectator : me.isEventHost) ? 'checked' : ''} />
+              </label>
+              <div class="row">
+                <button class="btn btn-primary btn-sm" id="btn-sched-lock" style="flex:1">${icon('lock', 13)} Lock In Schedule</button>
+                ${sr ? `<button class="btn btn-ghost btn-sm" id="btn-sched-clear">Clear</button>` : ''}
+              </div>
+            `
+        }
+      </div>
+
+      <div class="card ${me.isEventHost ? 'host-card' : ''}">
+        <div class="card-header">
+          <div class="card-title">Your Role & Live GPS</div>
+          ${me.isEventHost ? '<span class="host-pill">EVENT HOST (GM)</span>' : '<span class="tag-pill">PLAYING</span>'}
+        </div>
+        <div class="seg-bar" style="grid-template-columns:repeat(2,1fr)">
+          <button class="seg-btn ${!me.isEventHost ? 'active' : ''}" id="btn-role-player">Playing</button>
+          <button class="seg-btn ${me.isEventHost ? 'active' : ''}" id="btn-role-host">Host Event (Not Playing)</button>
+        </div>
         <div class="grid-2">
           <div class="field">
             <label>Your Name</label>
             <input type="text" id="inp-player-name" class="input" value="${esc(me.name)}" />
           </div>
-          <div class="field">
-            <label>Your Team</label>
-            <select id="sel-player-team" class="select">
-              ${s.teams.map((t) => `<option value="${t.id}" ${me.teamId === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
-            </select>
-          </div>
+          ${
+            me.isEventHost
+              ? `<div class="field">
+                  <label>Participation</label>
+                  <input type="text" class="input" value="Spectator / GM" disabled />
+                </div>`
+              : `<div class="field">
+                  <label>Your Team</label>
+                  <select id="sel-player-team" class="select">
+                    ${s.teams.map((t) => `<option value="${t.id}" ${me.teamId === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
+                  </select>
+                </div>`
+          }
         </div>
-
-        <div class="row">
-          <button class="btn ${s.room.shareGps ? 'btn-danger' : 'btn-primary'} btn-sm" id="btn-toggle-gps" style="flex:1">
-            ${icon('crosshair', 13)} ${s.room.shareGps ? 'Stop Live GPS' : 'Start Live GPS'}
-          </button>
-          <button class="btn btn-secondary btn-sm" id="btn-toggle-hide-gps">${me.gpsHidden ? 'Show Pin' : 'Hide Pin'}</button>
-          <button class="btn btn-secondary btn-sm" id="btn-toggle-freeze-gps">${me.gpsFrozen ? 'Unfreeze' : 'Freeze'}</button>
-        </div>
-
         ${
-          nearest
-            ? `<div class="sp-badge" style="border-color:var(--accent-2);color:#2dd4bf">Nearest Stop: <strong>${esc(nearest.station.name)}</strong> (${formatDistance(nearest.distanceM)}) · ${nearest.station.lines.join(', ')}</div>`
-            : `<div class="muted" style="font-size:11.5px">No GPS fix yet. Testing indoors? Place a Demo GPS pin anywhere in Sydney:</div>`
+          me.isEventHost
+            ? `<div class="muted" style="font-size:12px">You are hosting this event without playing. You can watch every team's live GPS (including private Hide+Seek zones), broadcast announcements, assign players to teams, and spin or award challenges from the Game & Wheel tabs.</div>`
+            : `
+              <div class="row">
+                <button class="btn ${s.room.shareGps ? 'btn-danger' : 'btn-primary'} btn-sm" id="btn-toggle-gps" style="flex:1">
+                  ${icon('crosshair', 13)} ${s.room.shareGps ? 'Stop GPS' : 'Start Live GPS'}
+                </button>
+                <button class="btn btn-secondary btn-sm" id="btn-toggle-hide-gps">${me.gpsHidden ? 'Show Pin' : 'Hide Pin'}</button>
+                <button class="btn btn-secondary btn-sm" id="btn-toggle-freeze-gps">${me.gpsFrozen ? 'Unfreeze' : 'Freeze'}</button>
+              </div>
+              ${
+                nearest
+                  ? `<div class="sp-badge" style="border-color:var(--accent-2);color:#2dd4bf">Nearest: <strong>${esc(nearest.station.name)}</strong> (${formatDistance(nearest.distanceM)}) · ${nearest.station.lines.join(', ')}</div>`
+                  : `<div class="muted" style="font-size:11.5px">Testing indoors? Place a Demo GPS pin:</div>`
+              }
+              <div class="row" style="gap:4px">
+                ${[
+                  ['Central', -33.88488, 151.20665],
+                  ['Circular Quay', -33.86133, 151.21046],
+                  ['Parramatta', -33.81744, 151.00493],
+                  ['Manly', -33.80045, 151.28371],
+                  ['Chatswood', -33.79749, 151.18111]
+                ]
+                  .map(([lbl, lat, lng]) => `<button class="btn btn-xs btn-ghost" data-demo-gps="${lat},${lng},${lbl}">${lbl}</button>`)
+                  .join('')}
+              </div>
+            `
         }
-        <div class="row" style="gap:4px">
-          ${[
-            ['Central', -33.88488, 151.20665],
-            ['Circular Quay', -33.86133, 151.21046],
-            ['Parramatta', -33.81744, 151.00493],
-            ['Manly', -33.80045, 151.28371],
-            ['Chatswood', -33.79749, 151.18111]
-          ]
-            .map(([lbl, lat, lng]) => `<button class="btn btn-xs btn-ghost" data-demo-gps="${lat},${lng},${lbl}">${lbl}</button>`)
-            .join('')}
-        </div>
       </div>
 
       <div class="card">
@@ -1967,14 +2547,15 @@ class JetLagSydneyApp {
               <div class="qr-box" id="room-qr-box"></div>
               <div class="row">
                 <button class="btn btn-primary btn-sm" id="btn-copy-invite" style="flex:1">${icon('copy', 13)} Copy Invite Link</button>
-                <button class="btn btn-danger btn-sm" id="btn-leave-room">Leave Room</button>
+                <button class="btn btn-secondary btn-sm" id="btn-force-sync" title="Push latest room state now">${icon('refresh', 13)} Sync</button>
+                <button class="btn btn-danger btn-sm" id="btn-leave-room">Leave</button>
               </div>
             `
             : `
-              <div class="muted" style="font-size:12px">Start a live room immediately with zero accounts (WebRTC P2P + multi-tab sync) and invite opponents via Room Code or QR.</div>
+              <div class="muted" style="font-size:12px">Start or join a live room across any phones or laptops — type either <strong>4K9P</strong> or <strong>SYD-4K9P</strong>.</div>
               <button class="btn btn-primary btn-block" id="btn-host-peer">Create Live Room</button>
               <div class="row">
-                <input type="text" id="inp-join-code" class="input mono" placeholder="Enter code e.g. SYD-4K9P" style="flex:1;text-transform:uppercase" value="${esc(s.room.code)}" />
+                <input type="text" id="inp-join-code" class="input mono" placeholder="Code e.g. SYD-4K9P or 4K9P" style="flex:1;text-transform:uppercase" value="${esc(s.room.code)}" />
                 <button class="btn btn-accent" id="btn-join-peer">Join</button>
               </div>
             `
@@ -1984,39 +2565,51 @@ class JetLagSydneyApp {
       <div class="card">
         <div class="card-title">Tunnel-Proof Firebase Sync (Optional)</div>
         <div class="muted" style="font-size:11.5px">
-          Recommended for outdoor Sydney game days through Metro tunnels and locked phone screens. Paste your free Firebase Realtime DB URL:
+          Recommended for outdoor game days through Metro tunnels and locked phone screens.
         </div>
         <div class="field">
           <label>Firebase Realtime Database URL</label>
           <input type="url" id="inp-fb-url" class="input" placeholder="https://your-app-default-rtdb.asia-southeast1.firebasedatabase.app" value="${esc(s.room.firebaseUrl)}" />
         </div>
         <div class="row">
-          <input type="text" id="inp-fb-code" class="input mono" placeholder="Room code (e.g. SYD-GAME1)" value="${esc(s.room.code || generateRoomCode())}" style="flex:1;text-transform:uppercase" />
-          <button class="btn btn-accent btn-sm" id="btn-connect-fb">Connect Firebase</button>
+          <input type="text" id="inp-fb-code" class="input mono" placeholder="Room code" value="${esc(s.room.code || generateRoomCode())}" style="flex:1;text-transform:uppercase" />
+          <button class="btn btn-accent btn-sm" id="btn-connect-fb">Connect</button>
         </div>
       </div>
 
       <div class="card">
-        <div class="card-title">Players in Session (${players.length})</div>
+        <div class="card-title">Participants (${players.length})</div>
         ${players
           .map((p) => {
             const t = s.teams.find((x) => x.id === p.teamId);
             return `
-              <div class="row-between" style="padding:5px 0;border-bottom:1px solid var(--border)">
+              <div class="row-between" style="padding:6px 0;border-bottom:1px solid var(--border)">
                 <div class="row">
-                  <span style="width:10px;height:10px;border-radius:50%;background:${t?.color || '#94a3b8'}"></span>
+                  <span style="width:10px;height:10px;border-radius:50%;background:${p.isEventHost ? '#a855f7' : (t?.color || '#94a3b8')}"></span>
                   <strong style="font-size:13px">${esc(p.name)} ${p.id === s.localPlayerId ? '(You)' : ''}</strong>
+                  ${p.isEventHost ? '<span class="host-pill">HOST</span>' : ''}
                 </div>
-                <span class="muted" style="font-size:11px">
-                  ${esc(t?.name || '')} · ${p.gpsFrozen ? 'Frozen' : p.gpsHidden ? 'Hidden' : p.lat != null ? 'GPS Live' : 'No GPS'}
-                </span>
+                ${
+                  me.isEventHost && p.id !== s.localPlayerId
+                    ? `<select class="select" data-gm-assign-player="${p.id}" style="width:auto;padding:3px 7px;font-size:11px">
+                        <option value="__host__" ${p.isEventHost ? 'selected' : ''}>Event Host (GM)</option>
+                        ${s.teams.map((tm) => `<option value="${tm.id}" ${!p.isEventHost && p.teamId === tm.id ? 'selected' : ''}>${esc(tm.name)}</option>`).join('')}
+                      </select>`
+                    : `<span class="muted" style="font-size:11px">
+                        ${p.isEventHost ? 'Spectating / Hosting' : `${esc(t?.name || '')} · ${p.gpsFrozen ? 'Frozen' : p.gpsHidden ? 'Hidden' : p.lat != null ? 'GPS Live' : 'No GPS'}`}
+                      </span>`
+                }
               </div>`;
           })
           .join('')}
       </div>
 
       <div class="card">
-        <div class="card-title">Save / Share Full Game Snapshot</div>
+        <div class="card-title">Preferences & Backup</div>
+        <label class="toggle-row">
+          <span style="font-size:13px;font-weight:600">Wheel Sound Effects</span>
+          <input type="checkbox" id="cb-sound-pref" ${s.soundEnabled ? 'checked' : ''} />
+        </label>
         <div class="row">
           <button class="btn btn-secondary btn-sm" id="btn-export-game" style="flex:1">Export Game JSON</button>
           <button class="btn btn-secondary btn-sm" id="btn-import-game" style="flex:1">Import Game JSON</button>
@@ -2036,12 +2629,118 @@ class JetLagSydneyApp {
       }
     }
 
+    // Scheduled & Locked Room events
+    pane.querySelector('#btn-sched-lock')?.addEventListener('click', () => {
+      const title = pane.querySelector('#sched-title').value.trim() || 'Sydney Jet Lag Session';
+      const mode = pane.querySelector('#sched-mode').value;
+      const roomCode = normalizeRoomCode(pane.querySelector('#sched-code').value) || generateRoomCode();
+      const startTimeIso = pane.querySelector('#sched-time').value;
+      const meetingStation = pane.querySelector('#sched-station').value.trim() || 'Central';
+      const hostIsSpectator = Boolean(pane.querySelector('#sched-host-gm')?.checked);
+      if (!startTimeIso) return this.toast('Choose a kickoff date and time.');
+      const meNow = store.getLocalPlayer();
+      if (hostIsSpectator && !meNow.isEventHost) this.setEventHostMode(true);
+      store.mutate((st) => {
+        st.scheduledRoom = {
+          id: st.scheduledRoom?.id || uid('sched'),
+          title,
+          mode,
+          roomCode,
+          startTimeIso,
+          meetingStation,
+          hostIsSpectator,
+          hostName: meNow.name,
+          locked: true,
+          lockedAt: Date.now(),
+          rsvps: hostIsSpectator ? [] : [{ id: meNow.id, name: meNow.name, readyAt: Date.now() }]
+        };
+        st.game.mode = mode;
+        st.game.rules = getDefaultRulesForMode(mode);
+        st.room.code = roomCode;
+      }, 'schedule');
+      store.addFeed({ type: 'system', text: `locked in scheduled event "${title}" (${roomCode})${hostIsSpectator ? ' as Non-Playing Host' : ''} starting at ${new Date(startTimeIso).toLocaleString()}.` });
+      this.toast(`Game room ${roomCode} locked in.`);
+    });
+
+    pane.querySelector('#btn-sched-clear')?.addEventListener('click', () => {
+      store.mutate((st) => { st.scheduledRoom = null; }, 'schedule');
+      this.toast('Cleared scheduled room.');
+    });
+
+    pane.querySelector('#btn-sched-unlock')?.addEventListener('click', () => {
+      if (!confirm('Unlock this scheduled game room so you can edit the time, mode, or meeting station?')) return;
+      store.mutate((st) => {
+        if (st.scheduledRoom) st.scheduledRoom.locked = false;
+      }, 'schedule');
+      this.toast('Schedule unlocked for editing.');
+    });
+
+    pane.querySelector('#btn-sched-rsvp')?.addEventListener('click', () => {
+      const meNow = store.getLocalPlayer();
+      store.mutate((st) => {
+        if (!st.scheduledRoom) return;
+        const list = st.scheduledRoom.rsvps || [];
+        const exists = list.some((r) => r.id === meNow.id);
+        st.scheduledRoom.rsvps = exists
+          ? list.filter((r) => r.id !== meNow.id)
+          : [...list, { id: meNow.id, name: meNow.name, readyAt: Date.now() }];
+      }, 'schedule');
+    });
+
+    pane.querySelector('#btn-sched-golive')?.addEventListener('click', () => {
+      const sched = store.get().scheduledRoom;
+      if (!sched) return;
+      this.mp.hostPeerRoom(sched.roomCode);
+    });
+
+    pane.querySelector('#btn-sched-copy')?.addEventListener('click', async () => {
+      if (!schedInviteUrl) return;
+      try {
+        await navigator.clipboard.writeText(schedInviteUrl);
+        this.toast('Scheduled room invite link copied.');
+      } catch {
+        prompt('Copy scheduled invite link:', schedInviteUrl);
+      }
+    });
+
+    pane.querySelector('#btn-sched-ics')?.addEventListener('click', () => {
+      if (sr) {
+        downloadScheduleIcs(sr, schedInviteUrl);
+        this.toast('Downloaded calendar invite (.ics).');
+      }
+    });
+
+    pane.querySelector('#btn-role-player')?.addEventListener('click', () => this.setEventHostMode(false));
+    pane.querySelector('#btn-role-host')?.addEventListener('click', () => this.setEventHostMode(true));
+
+    pane.querySelectorAll('[data-gm-assign-player]').forEach((sel) => {
+      sel.addEventListener('change', () => {
+        const pid = sel.dataset.gmAssignPlayer;
+        const val = sel.value;
+        store.mutate((st) => {
+          const pl = st.players[pid];
+          if (!pl) return;
+          if (val === '__host__') {
+            pl.isEventHost = true;
+            pl.teamId = null;
+            pl.reassignedAt = Date.now();
+          } else {
+            const tm = st.teams.find((x) => x.id === val);
+            pl.isEventHost = false;
+            pl.teamId = val;
+            if (tm) pl.color = tm.color;
+            pl.reassignedAt = Date.now();
+          }
+        }, 'teams');
+      });
+    });
+
     pane.querySelector('#inp-player-name').addEventListener('change', (e) => {
       const v = e.target.value.trim() || 'Player';
       store.mutate((st) => { st.players[st.localPlayerId].name = v; }, 'profile');
     });
 
-    pane.querySelector('#sel-player-team').addEventListener('change', (e) => {
+    pane.querySelector('#sel-player-team')?.addEventListener('change', (e) => {
       const tid = e.target.value;
       store.mutate((st) => {
         const t = st.teams.find((x) => x.id === tid);
@@ -2050,20 +2749,20 @@ class JetLagSydneyApp {
       }, 'profile');
     });
 
-    pane.querySelector('#btn-toggle-gps').addEventListener('click', () => {
+    pane.querySelector('#btn-toggle-gps')?.addEventListener('click', () => {
       if (store.get().room.shareGps) this.mp.stopGps();
       else this.mp.startGps();
       this.renderLivePane();
     });
 
-    pane.querySelector('#btn-toggle-hide-gps').addEventListener('click', () => {
+    pane.querySelector('#btn-toggle-hide-gps')?.addEventListener('click', () => {
       store.mutate((st) => {
         const p = st.players[st.localPlayerId];
         p.gpsHidden = !p.gpsHidden;
       }, 'gps');
     });
 
-    pane.querySelector('#btn-toggle-freeze-gps').addEventListener('click', () => {
+    pane.querySelector('#btn-toggle-freeze-gps')?.addEventListener('click', () => {
       store.mutate((st) => {
         const p = st.players[st.localPlayerId];
         p.gpsFrozen = !p.gpsFrozen;
@@ -2087,10 +2786,14 @@ class JetLagSydneyApp {
 
     pane.querySelector('#btn-host-peer')?.addEventListener('click', () => this.mp.hostPeerRoom());
     pane.querySelector('#btn-join-peer')?.addEventListener('click', () => {
-      const code = pane.querySelector('#inp-join-code').value.trim();
-      if (!code) return this.toast('Enter a room code first.');
+      const code = normalizeRoomCode(pane.querySelector('#inp-join-code').value);
+      if (!code) return this.toast('Enter a room code first (e.g. SYD-4K9P or 4K9P).');
       this.mp.joinPeerRoom(code);
     });
+    pane.querySelector('#inp-join-code')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') pane.querySelector('#btn-join-peer')?.click();
+    });
+    pane.querySelector('#btn-force-sync')?.addEventListener('click', () => this.mp.forceSyncNow());
     pane.querySelector('#btn-leave-room')?.addEventListener('click', () => this.mp.disconnect());
     pane.querySelector('#btn-copy-invite')?.addEventListener('click', async () => {
       const url = this.mp.getInviteUrl();
@@ -2106,6 +2809,10 @@ class JetLagSydneyApp {
       const url = pane.querySelector('#inp-fb-url').value.trim();
       const code = pane.querySelector('#inp-fb-code').value.trim();
       this.mp.connectFirebaseRoom(url, code);
+    });
+
+    pane.querySelector('#cb-sound-pref')?.addEventListener('change', (e) => {
+      store.mutate((st) => { st.soundEnabled = e.target.checked; }, 'sound', false);
     });
 
     pane.querySelector('#btn-export-game').addEventListener('click', () => {
@@ -2224,26 +2931,27 @@ class JetLagSydneyApp {
     document.getElementById('m-pin-cancel').onclick = () => this.closeModal();
   }
 
-  openAddCardModal(kind) {
+  openAddCardModal(kind, existing = null) {
     const isChallenge = kind === 'challenge';
+    const isEdit = Boolean(existing);
     this.openModal(`
-      <div class="card-title">${isChallenge ? 'Add Custom Challenge' : 'Add Custom Curse'}</div>
+      <div class="card-title">${isEdit ? 'Edit' : 'Create'} ${isChallenge ? 'Challenge' : 'Curse'}</div>
       <div class="field">
         <label>Title</label>
-        <input type="text" id="mc-title" class="input" placeholder="e.g. Ferry Race to Balmain" />
+        <input type="text" id="mc-title" class="input" placeholder="e.g. Ferry Race to Balmain" value="${esc(existing?.title || '')}" />
       </div>
       <div class="field">
-        <label>Description</label>
-        <textarea id="mc-desc" class="textarea" placeholder="Full rules and proof requirements..."></textarea>
+        <label>Rules / Description</label>
+        <textarea id="mc-desc" class="textarea" placeholder="Full rules and proof requirements...">${esc(existing?.description || '')}</textarea>
       </div>
       <div class="grid-2">
         <div class="field">
           <label>${isChallenge ? 'Reward (Coins)' : 'Cost (Coins)'}</label>
-          <input type="number" id="mc-coins" class="input" value="600" />
+          <input type="number" id="mc-coins" class="input" value="${existing ? (isChallenge ? existing.coins : existing.cost) : 500}" min="0" step="50" />
         </div>
         <div class="field">
           <label>${isChallenge ? 'Veto Penalty (Mins)' : 'Duration (Mins)'}</label>
-          <input type="number" id="mc-mins" class="input" value="20" />
+          <input type="number" id="mc-mins" class="input" value="${existing ? (isChallenge ? existing.vetoMins : existing.durationMins) : 15}" min="1" />
         </div>
       </div>
       ${
@@ -2251,53 +2959,69 @@ class JetLagSydneyApp {
           ? `<div class="grid-2">
               <div class="field">
                 <label>Category</label>
-                <select id="mc-cat" class="select">${CHALLENGE_CATEGORIES.map((c) => `<option value="${c.id}">${c.label}</option>`).join('')}</select>
+                <select id="mc-cat" class="select">${CHALLENGE_CATEGORIES.map((c) => `<option value="${c.id}" ${(existing?.category || 'transit') === c.id ? 'selected' : ''}>${c.label}</option>`).join('')}</select>
               </div>
               <div class="field">
                 <label>Difficulty</label>
-                <select id="mc-diff" class="select"><option>Easy</option><option selected>Medium</option><option>Hard</option></select>
+                <select id="mc-diff" class="select">${['Easy', 'Medium', 'Hard'].map((d) => `<option ${(existing?.difficulty || 'Medium') === d ? 'selected' : ''}>${d}</option>`).join('')}</select>
               </div>
             </div>`
-          : ''
+          : `<div class="field">
+              <label>Casting Condition</label>
+              <input type="text" id="mc-cond" class="input" value="${esc(existing?.castingCondition || 'Pay coin cost')}" />
+            </div>`
       }
       <div class="row">
-        <button class="btn btn-primary" id="mc-save" style="flex:1">Add to Deck</button>
+        <button class="btn btn-primary" id="mc-save" style="flex:1">${isEdit ? 'Save Changes' : 'Add to Deck'}</button>
         <button class="btn btn-ghost" id="mc-cancel">Cancel</button>
       </div>
     `);
     document.getElementById('mc-save').onclick = () => {
       const title = document.getElementById('mc-title').value.trim();
       const description = document.getElementById('mc-desc').value.trim();
-      if (!title || !description) return this.toast('Enter both title and description.');
-      const coins = Number(document.getElementById('mc-coins').value) || 500;
-      const mins = Number(document.getElementById('mc-mins').value) || 15;
+      if (!title) return this.toast('Enter a title.');
+      const coins = Math.max(0, Number(document.getElementById('mc-coins').value) || 0);
+      const mins = Math.max(1, Number(document.getElementById('mc-mins').value) || 15);
       store.mutate((s) => {
         if (isChallenge) {
-          s.decks.challenges.unshift({
-            id: uid('ch'),
+          const payload = {
+            id: existing?.id || uid('ch'),
             title,
-            description,
+            description: description || 'Complete this challenge and submit proof.',
             coins,
             vetoMins: mins,
             category: document.getElementById('mc-cat').value,
             difficulty: document.getElementById('mc-diff').value,
-            active: true
-          });
+            active: existing ? existing.active : true
+          };
+          if (isEdit) {
+            const idx = s.decks.challenges.findIndex((x) => x.id === existing.id);
+            if (idx >= 0) s.decks.challenges[idx] = payload;
+          } else {
+            s.decks.challenges.unshift(payload);
+          }
         } else {
-          s.decks.curses.unshift({
-            id: uid('cu'),
+          const payload = {
+            id: existing?.id || uid('cu'),
             title,
-            description,
+            description: description || 'Custom curse.',
             cost: coins,
             durationMins: mins,
-            castingCondition: 'Custom Curse',
-            active: true
-          });
+            castingCondition: document.getElementById('mc-cond')?.value.trim() || 'Custom Curse',
+            active: existing ? existing.active : true
+          };
+          if (isEdit) {
+            const idx = s.decks.curses.findIndex((x) => x.id === existing.id);
+            if (idx >= 0) s.decks.curses[idx] = payload;
+          } else {
+            s.decks.curses.unshift(payload);
+          }
         }
       }, 'deck');
       this.refreshWheelPool();
+      this.renderWheelLanded();
       this.closeModal();
-      this.toast(`Added "${title}" to custom deck.`);
+      this.toast(isEdit ? `Saved "${title}".` : `Added "${title}" to your deck.`);
     };
     document.getElementById('mc-cancel').onclick = () => this.closeModal();
   }

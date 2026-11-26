@@ -1,7 +1,7 @@
 // Interactive Real-World Sydney Transit Map & Jet Lag Strategy Toolkit (Leaflet)
 import { SYDNEY_NETWORK } from '../data/sydney-network.js';
-import { store, uid } from './state.js';
-import { haversineM, formatDistance, canSeePlayerGps, getDividingSide } from './modes.js';
+import { store, uid } from './state.js?v=9';
+import { haversineM, formatDistance, canSeePlayerGps, getDividingSide } from './modes.js?v=9';
 
 const BASEMAPS = {
   dark: {
@@ -474,10 +474,17 @@ export class SydneyMapController {
       actions.appendChild(b);
     };
 
+    const isHostGm = Boolean(myPlayer?.isEventHost);
+
     if (state.game.rules.stationClaiming) {
-      if (claim && claim.teamId === myTeam.id) {
+      if (isHostGm) {
+        state.teams.forEach((tm) => {
+          addBtn(`Award to ${tm.name}`, 'btn-primary', () => this.callbacks.onToggleClaim?.(st, true, tm.id));
+        });
+        if (claim) addBtn('Clear Claim', 'btn-ghost', () => this.callbacks.onToggleClaim?.(st, false));
+      } else if (claim && claim.teamId === myTeam?.id) {
         addBtn('Unclaim Station', 'btn-ghost', () => this.callbacks.onToggleClaim?.(st, false));
-      } else {
+      } else if (myTeam) {
         addBtn(claim ? `Steal for ${myTeam.name}` : `Claim for ${myTeam.name}`, 'btn-primary', () =>
           this.callbacks.onToggleClaim?.(st, true)
         );
@@ -489,16 +496,26 @@ export class SydneyMapController {
     }
 
     if (state.game.rules.flags) {
-      addBtn(`Drop ${myTeam.name} Flag`, 'btn-accent', () => this.callbacks.onDropFlag?.(st));
+      if (isHostGm) {
+        state.teams.forEach((tm) => {
+          addBtn(`Place ${tm.name} Flag`, 'btn-accent', () => this.callbacks.onDropFlag?.(st, tm.id));
+        });
+      } else if (myTeam) {
+        addBtn(`Drop ${myTeam.name} Flag`, 'btn-accent', () => this.callbacks.onDropFlag?.(st));
+      }
     }
 
     if (state.game.rules.checkpoints) {
       const existingCp = state.checkpoints.find((c) => c.stationId === st.id);
-      if (existingCp) {
+      if (existingCp && !isHostGm) {
         addBtn('Check Off Checkpoint', 'btn-primary', () => this.callbacks.onCheckCheckpoint?.(existingCp.id));
-      } else {
+      } else if (!existingCp) {
         addBtn('+ Add Checkpoint', 'btn-secondary', () => this.callbacks.onAddCheckpoint?.(st));
       }
+    }
+
+    if (isHostGm) {
+      addBtn('Broadcast Station Alert', 'btn-secondary', () => this.callbacks.onHostBroadcastStation?.(st));
     }
 
     addBtn('Draw Radar Here', 'btn-ghost', () => this.callbacks.onQuickRadar?.(st.lat, st.lng, st.name));
@@ -521,9 +538,10 @@ export class SydneyMapController {
   renderModeOverlays(state) {
     this.modeOverlayLayer.clearLayers();
     const myTeam = store.getLocalTeam();
+    const isHostGm = Boolean(store.getLocalPlayer()?.isEventHost);
 
-    // 1. Hide + Seek Hiding Zone
-    if (state.game.rules.hideSeekQA && state.hidingZone && (state.hidingZone.revealed || state.hidingZone.setByTeamId === myTeam?.id)) {
+    // 1. Hide + Seek Hiding Zone (always visible to Event Host GM!)
+    if (state.game.rules.hideSeekQA && state.hidingZone && (isHostGm || state.hidingZone.revealed || state.hidingZone.setByTeamId === myTeam?.id)) {
       const hz = state.hidingZone;
       L.circle([hz.lat, hz.lng], {
         radius: hz.radiusM || state.game.hidingRadiusM || 500,
@@ -663,9 +681,10 @@ export class SydneyMapController {
   renderAnnotations(state) {
     this.annotationsLayer.clearLayers();
     const myTeam = store.getLocalTeam();
+    const isHostGm = Boolean(store.getLocalPlayer()?.isEventHost);
 
     for (const ann of state.annotations || []) {
-      if (ann.scope === 'team' && ann.teamId !== myTeam?.id) continue;
+      if (ann.scope === 'team' && !isHostGm && ann.teamId !== myTeam?.id) continue;
       const d = ann.data;
 
       if (ann.type === 'radar') {
@@ -933,13 +952,14 @@ export class SydneyMapController {
   finishDraftTool() {
     const myTeam = store.getLocalTeam();
     const myPlayer = store.getLocalPlayer();
+    const teamId = myTeam?.id || null;
     if (this.activeTool === 'polygon' && this.draftPoints.length >= 3) {
       store.mutate((s) => {
         s.annotations.push({
           id: uid('ann'),
           type: 'polygon',
           scope: this.toolScope,
-          teamId: myTeam.id,
+          teamId,
           createdBy: myPlayer.name,
           createdAt: Date.now(),
           data: { points: [...this.draftPoints], color: '#ef4444', label: 'Eliminated Zone' }
@@ -956,7 +976,7 @@ export class SydneyMapController {
           id: uid('ann'),
           type: 'ruler',
           scope: this.toolScope,
-          teamId: myTeam.id,
+          teamId,
           createdBy: myPlayer.name,
           createdAt: Date.now(),
           data: { points: [...this.draftPoints] }
@@ -977,7 +997,7 @@ export class SydneyMapController {
         id: uid('ann'),
         type: 'radar',
         scope: this.toolScope,
-        teamId: myTeam.id,
+        teamId: myTeam?.id || null,
         createdBy: myPlayer.name,
         createdAt: Date.now(),
         data: { lat, lng, radiusKm, result, label }
@@ -998,7 +1018,7 @@ export class SydneyMapController {
         id: uid('ann'),
         type: 'thermometer',
         scope: this.toolScope,
-        teamId: myTeam.id,
+        teamId: myTeam?.id || null,
         createdBy: myPlayer.name,
         createdAt: Date.now(),
         data: { pA, pB, hotterIsB }
@@ -1018,10 +1038,10 @@ export class SydneyMapController {
         id: uid('ann'),
         type: 'pin',
         scope: this.toolScope,
-        teamId: myTeam.id,
+        teamId: myTeam?.id || null,
         createdBy: myPlayer.name,
         createdAt: Date.now(),
-        data: { lat, lng, label, color: color || myTeam.color }
+        data: { lat, lng, label, color: color || myTeam?.color || '#168388' }
       });
     }, 'annotation');
   }

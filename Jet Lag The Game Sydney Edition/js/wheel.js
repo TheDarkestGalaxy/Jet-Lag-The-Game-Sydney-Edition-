@@ -1,6 +1,6 @@
 // Tactile HTML5 Canvas Challenge & Curse Randomizer Wheel with Physics & Synth Audio
-import { CHALLENGE_CATEGORIES } from '../data/challenges.js';
-import { store } from './state.js';
+import { CHALLENGE_CATEGORIES } from '../data/challenges.js?v=9';
+import { store } from './state.js?v=9';
 
 const SLICE_PALETTE = [
   '#F99D1C', '#0098CD', '#168388', '#D11F2F',
@@ -182,9 +182,12 @@ export class ChallengeWheel {
 
     if (n === 0) {
       ctx.fillStyle = '#94a3b8';
-      ctx.font = '600 14px Inter, sans-serif';
+      ctx.font = '700 14px "Space Grotesk", Inter, sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText('No active cards in filter!', cx, cy);
+      ctx.fillText('No challenges yet', cx, cy - 8);
+      ctx.font = '500 12px Inter, sans-serif';
+      ctx.fillStyle = '#64748b';
+      ctx.fillText('Create your own below to spin', cx, cy + 14);
       ctx.restore();
       return;
     }
@@ -213,16 +216,23 @@ export class ChallengeWheel {
       // Label
       ctx.save();
       ctx.translate(cx, cy);
-      ctx.rotate(start + sliceArc / 2);
-      ctx.textAlign = 'right';
-      ctx.textBaseline = 'middle';
       ctx.fillStyle = '#ffffff';
       ctx.shadowColor = 'rgba(0,0,0,0.65)';
       ctx.shadowBlur = 4;
-      ctx.font = `700 ${n > 12 ? 10.5 : 12}px "Space Grotesk", Inter, sans-serif`;
-      const maxChars = n > 12 ? 16 : 20;
-      const label = item.title.length > maxChars ? `${item.title.slice(0, maxChars - 1)}…` : item.title;
-      ctx.fillText(label, r - 14, 0);
+      ctx.font = `700 ${n > 12 ? 10.5 : 12.5}px "Space Grotesk", Inter, sans-serif`;
+      if (n === 1) {
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const label = item.title.length > 24 ? `${item.title.slice(0, 23)}…` : item.title;
+        ctx.fillText(label, 0, -r * 0.55);
+      } else {
+        ctx.rotate(start + sliceArc / 2);
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        const maxChars = n > 12 ? 16 : 20;
+        const label = item.title.length > maxChars ? `${item.title.slice(0, maxChars - 1)}…` : item.title;
+        ctx.fillText(label, r - 14, 0);
+      }
       ctx.restore();
     }
 

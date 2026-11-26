@@ -1,14 +1,28 @@
-import { DEFAULT_CHALLENGES, DEFAULT_CURSES, HIDE_SEEK_QUESTIONS } from '../data/challenges.js';
-import { GAME_MODES, CTF_PRESETS, RACE_PRESETS, getDefaultRulesForMode } from './modes.js';
+import { DEFAULT_CHALLENGES, DEFAULT_CURSES, HIDE_SEEK_QUESTIONS } from '../data/challenges.js?v=9';
+import { GAME_MODES, CTF_PRESETS, RACE_PRESETS, getDefaultRulesForMode } from './modes.js?v=9';
 
-const STORAGE_KEY = 'jetlag_sydney_state_v2';
+const STORAGE_KEY = 'jetlag_sydney_state_v4';
+const TAB_PLAYER_KEY = 'jetlag_sydney_tab_player_id';
 
 export function uid(prefix = 'id') {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
+function getTabPlayerId() {
+  try {
+    let id = sessionStorage.getItem(TAB_PLAYER_KEY);
+    if (!id) {
+      id = uid('p');
+      sessionStorage.setItem(TAB_PLAYER_KEY, id);
+    }
+    return id;
+  } catch {
+    return uid('p');
+  }
+}
+
 export function createInitialState() {
-  const localPlayerId = uid('p');
+  const localPlayerId = getTabPlayerId();
   const modeId = 'hide_seek';
   return {
     version: 1,
@@ -18,7 +32,7 @@ export function createInitialState() {
     soundEnabled: true,
     room: {
       code: '',
-      engine: 'peerjs', // 'peerjs' | 'firebase'
+      engine: 'cloud', // 'cloud' (WSS relay + BroadcastChannel) | 'firebase'
       isHost: false,
       connected: false,
       statusText: 'Solo / Local Mode',
@@ -52,6 +66,7 @@ export function createInitialState() {
         id: localPlayerId,
         name: 'Player 1',
         teamId: 'team-a',
+        isEventHost: false,
         color: '#F99D1C',
         lat: null,
         lng: null,
@@ -83,6 +98,7 @@ export function createInitialState() {
     qaLog: [], // { id, questionId, category, title, prompt, askedBy, askedTeamId, askedAt, answer, answeredBy, answeredAt, photoDataUrl }
     activeCurses: [], // { id, curseId, title, description, fromTeamId, targetTeamId, castAt, expiresAt }
     activeTransitBurn: null, // { mode, label, coinsPerMin, startedAt, teamId }
+    scheduledRoom: null, // { id, title, mode, startTimeIso, meetingStation, roomCode, locked, lockedAt, rsvps: [{ id, name, readyAt }] }
     feed: [
       {
         id: uid('ev'),
@@ -121,15 +137,27 @@ class Store {
         dividingLine: { ...base.dividingLine, ...(parsed.dividingLine || {}) },
         winSectors: { ...base.winSectors, ...(parsed.winSectors || {}) },
         decks: {
-          challenges: parsed.decks?.challenges?.length ? parsed.decks.challenges : base.decks.challenges,
-          curses: parsed.decks?.curses?.length ? parsed.decks.curses : base.decks.curses,
+          challenges: Array.isArray(parsed.decks?.challenges) ? parsed.decks.challenges : base.decks.challenges,
+          curses: Array.isArray(parsed.decks?.curses) ? parsed.decks.curses : base.decks.curses,
           questions: parsed.decks?.questions?.length ? parsed.decks.questions : base.decks.questions
         }
       };
-      if (!merged.players[merged.localPlayerId]) {
-        merged.players[merged.localPlayerId] = base.players[base.localPlayerId];
-        merged.players[merged.localPlayerId].id = merged.localPlayerId;
-      }
+      const tabId = getTabPlayerId();
+      const prevPlayer = parsed.players?.[parsed.localPlayerId] || base.players[base.localPlayerId];
+      merged.localPlayerId = tabId;
+      // Start each fresh browser session with its own unique player entry so multi-tab testing acts like distinct devices
+      merged.players = {
+        [tabId]: {
+          ...base.players[base.localPlayerId],
+          name: prevPlayer?.name || 'Player 1',
+          teamId: prevPlayer?.isEventHost ? null : (prevPlayer?.teamId || 'team-a'),
+          isEventHost: Boolean(prevPlayer?.isEventHost),
+          color: prevPlayer?.color || '#F99D1C',
+          id: tabId,
+          online: true,
+          lastSeen: Date.now()
+        }
+      };
       return merged;
     } catch {
       return createInitialState();
@@ -162,6 +190,7 @@ class Store {
 
   getLocalTeam() {
     const p = this.getLocalPlayer();
+    if (p?.isEventHost) return null;
     return this.state.teams.find((t) => t.id === p?.teamId) || this.state.teams[0];
   }
 
@@ -217,12 +246,13 @@ class Store {
       annotations: s.annotations,
       qaLog: s.qaLog,
       activeCurses: s.activeCurses,
+      scheduledRoom: s.scheduledRoom,
       feed: s.feed.slice(-80),
       decks: s.decks
     };
   }
 
-  /** Merge an incoming shared snapshot from host/Firebase without clobbering local identity or preferences */
+  /** Merge an incoming shared snapshot from room relay/Firebase without clobbering local identity or other live players */
   applySharedSnapshot(snap) {
     if (!snap) return;
     this.mutate((s) => {
@@ -231,15 +261,28 @@ class Store {
       if (snap.game) s.game = { ...s.game, ...snap.game };
       if (snap.teams) s.teams = snap.teams;
       if (snap.players) {
-        s.players = { ...snap.players };
-        if (myLocalPlayer) {
-          s.players[myId] = {
-            ...(snap.players[myId] || {}),
-            ...myLocalPlayer,
-            // Allow host role/team reassignment only if local wasn't just changed
-            teamId: myLocalPlayer.teamId || snap.players[myId]?.teamId || s.teams[0]?.id
-          };
+        // Merge remote players rather than wiping active peers
+        const nextPlayers = { ...s.players };
+        for (const [pid, pdata] of Object.entries(snap.players)) {
+          if (pid === myId) continue;
+          if (!pdata) continue;
+          const prev = nextPlayers[pid];
+          if (!prev || (pdata.lastSeen || 0) >= (prev.lastSeen || 0)) {
+            nextPlayers[pid] = pdata;
+          }
         }
+        if (myLocalPlayer) {
+          // Honor remote Event Host team reassignment if remote specifically updated our teamId more recently
+          const remoteMe = snap.players[myId];
+          const hostReassigned =
+            remoteMe &&
+            remoteMe.reassignedAt &&
+            remoteMe.reassignedAt > (myLocalPlayer.reassignedAt || 0);
+          nextPlayers[myId] = hostReassigned
+            ? { ...myLocalPlayer, teamId: remoteMe.teamId, isEventHost: remoteMe.isEventHost, color: remoteMe.color, reassignedAt: remoteMe.reassignedAt }
+            : myLocalPlayer;
+        }
+        s.players = nextPlayers;
       }
       if (snap.claimedStations) s.claimedStations = snap.claimedStations;
       if (snap.flags) s.flags = snap.flags;
@@ -250,7 +293,14 @@ class Store {
       if (snap.annotations) s.annotations = snap.annotations;
       if (snap.qaLog) s.qaLog = snap.qaLog;
       if (snap.activeCurses) s.activeCurses = snap.activeCurses;
-      if (snap.feed) s.feed = snap.feed;
+      if (snap.scheduledRoom !== undefined) s.scheduledRoom = snap.scheduledRoom;
+      if (Array.isArray(snap.feed)) {
+        // Merge feed entries by unique ID and sort chronologically so neither side loses recent messages
+        const byId = new Map();
+        for (const f of s.feed) byId.set(f.id, f);
+        for (const f of snap.feed) byId.set(f.id, f);
+        s.feed = [...byId.values()].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)).slice(-120);
+      }
       if (snap.decks) s.decks = snap.decks;
     }, 'remote_sync', false);
   }
