@@ -1,7 +1,7 @@
 // Interactive Real-World Sydney Transit Map & Jet Lag Strategy Toolkit (Leaflet)
 import { SYDNEY_NETWORK } from '../data/sydney-network.js';
-import { store, uid } from './state.js?v=9';
-import { haversineM, formatDistance, canSeePlayerGps, getDividingSide } from './modes.js?v=9';
+import { store, uid } from './state.js?v=11';
+import { haversineM, formatDistance, canSeePlayerGps, getDividingSide, getAccess } from './modes.js?v=11';
 
 const BASEMAPS = {
   dark: {
@@ -463,18 +463,24 @@ export class SydneyMapController {
     `;
 
     const actions = div.querySelector('.sp-actions');
-    const addBtn = (label, cls, onClick) => {
+    const addBtn = (label, cls, onClick, disabled = false) => {
       const b = document.createElement('button');
       b.className = `btn btn-xs ${cls}`;
       b.textContent = label;
-      b.onclick = () => {
-        onClick();
-        this.map.closePopup();
-      };
+      b.disabled = Boolean(disabled);
+      if (!disabled) {
+        b.onclick = () => {
+          onClick();
+          this.map.closePopup();
+        };
+      }
       actions.appendChild(b);
     };
 
-    const isHostGm = Boolean(myPlayer?.isEventHost);
+    const access = getAccess(state);
+    const isHostGm = access.isGm;
+    const claimLimitM = Number(state.game.stationClaimRadiusM) || 100;
+    const cpLimitM = Number(state.game.checkpointRadiusM) || 100;
 
     if (state.game.rules.stationClaiming) {
       if (isHostGm) {
@@ -483,15 +489,31 @@ export class SydneyMapController {
         });
         if (claim) addBtn('Clear Claim', 'btn-ghost', () => this.callbacks.onToggleClaim?.(st, false));
       } else if (claim && claim.teamId === myTeam?.id) {
-        addBtn('Unclaim Station', 'btn-ghost', () => this.callbacks.onToggleClaim?.(st, false));
+        if (access.canEditScores) {
+          addBtn('Unclaim Station', 'btn-ghost', () => this.callbacks.onToggleClaim?.(st, false));
+        } else {
+          addBtn('Claimed by Your Team', 'btn-ghost', () => {}, true);
+        }
       } else if (myTeam) {
-        addBtn(claim ? `Steal for ${myTeam.name}` : `Claim for ${myTeam.name}`, 'btn-primary', () =>
-          this.callbacks.onToggleClaim?.(st, true)
-        );
+        const blockedBySteal = Boolean(claim && !state.game.allowStealingStations);
+        const needGps = access.mustVerifyGps && dist == null;
+        const tooFar = access.mustVerifyGps && dist != null && dist > claimLimitM;
+
+        if (blockedBySteal) {
+          addBtn('Already Claimed (No Stealing)', 'btn-ghost', () => {}, true);
+        } else if (needGps) {
+          addBtn(`Enable Live GPS (<= ${claimLimitM}m to claim)`, 'btn-secondary', () => {}, true);
+        } else if (tooFar) {
+          addBtn(`Too far to claim (${formatDistance(dist)} / ${claimLimitM}m max)`, 'btn-secondary', () => {}, true);
+        } else {
+          addBtn(claim ? `Steal for ${myTeam.name}` : `Claim for ${myTeam.name}`, 'btn-primary', () =>
+            this.callbacks.onToggleClaim?.(st, true)
+          );
+        }
       }
     }
 
-    if (state.game.rules.hideSeekQA) {
+    if (state.game.rules.hideSeekQA && (isHostGm || myTeam?.role === 'hider' || !access.gmExists)) {
       addBtn('Set Hiding Zone Here', 'btn-accent', () => this.callbacks.onSetHidingZone?.(st));
     }
 
@@ -501,15 +523,29 @@ export class SydneyMapController {
           addBtn(`Place ${tm.name} Flag`, 'btn-accent', () => this.callbacks.onDropFlag?.(st, tm.id));
         });
       } else if (myTeam) {
-        addBtn(`Drop ${myTeam.name} Flag`, 'btn-accent', () => this.callbacks.onDropFlag?.(st));
+        const flagLimitM = Number(state.game.flagPickupRadiusM) || 100;
+        const tooFarFlag = access.mustVerifyGps && (dist == null || dist > flagLimitM);
+        addBtn(
+          tooFarFlag ? `Move <= ${flagLimitM}m to Drop Flag` : `Drop ${myTeam.name} Flag`,
+          tooFarFlag ? 'btn-secondary' : 'btn-accent',
+          () => this.callbacks.onDropFlag?.(st),
+          tooFarFlag
+        );
       }
     }
 
     if (state.game.rules.checkpoints) {
       const existingCp = state.checkpoints.find((c) => c.stationId === st.id);
       if (existingCp && !isHostGm) {
-        addBtn('Check Off Checkpoint', 'btn-primary', () => this.callbacks.onCheckCheckpoint?.(existingCp.id));
-      } else if (!existingCp) {
+        const needGpsCp = access.mustVerifyGps && dist == null;
+        const tooFarCp = access.mustVerifyGps && dist != null && dist > cpLimitM;
+        addBtn(
+          needGpsCp ? `Enable GPS (<= ${cpLimitM}m)` : tooFarCp ? `Move <= ${cpLimitM}m (${formatDistance(dist)})` : 'Check Off Checkpoint',
+          needGpsCp || tooFarCp ? 'btn-secondary' : 'btn-primary',
+          () => this.callbacks.onCheckCheckpoint?.(existingCp.id),
+          needGpsCp || tooFarCp
+        );
+      } else if (!existingCp && access.canEditRules) {
         addBtn('+ Add Checkpoint', 'btn-secondary', () => this.callbacks.onAddCheckpoint?.(st));
       }
     }

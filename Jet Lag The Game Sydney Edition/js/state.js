@@ -1,11 +1,27 @@
-import { DEFAULT_CHALLENGES, DEFAULT_CURSES, HIDE_SEEK_QUESTIONS } from '../data/challenges.js?v=9';
-import { GAME_MODES, CTF_PRESETS, RACE_PRESETS, getDefaultRulesForMode } from './modes.js?v=9';
+import { DEFAULT_CHALLENGES, DEFAULT_CURSES, HIDE_SEEK_QUESTIONS, TRANSIT_RATES } from '../data/challenges.js?v=11';
+import { GAME_MODES, CTF_PRESETS, RACE_PRESETS, getDefaultRulesForMode } from './modes.js?v=11';
 
-const STORAGE_KEY = 'jetlag_sydney_state_v4';
+const STORAGE_KEY = 'jetlag_sydney_state_v5';
 const TAB_PLAYER_KEY = 'jetlag_sydney_tab_player_id';
 
 export function uid(prefix = 'id') {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+export function createDefaultTransitRates() {
+  return Object.fromEntries(TRANSIT_RATES.map((r) => [r.mode, r.coinsPerMin]));
+}
+
+export function createDefaultPermissions() {
+  return {
+    lockRulesToGm: true,
+    lockScoresToGm: true,
+    lockTeamsToGm: true,
+    lockDeckToGm: true,
+    lockNamesAfterJoin: true,
+    strictGpsProximity: true,
+    allowDemoGps: false
+  };
 }
 
 function getTabPlayerId() {
@@ -50,13 +66,25 @@ export function createInitialState() {
       startedAt: null,
       elapsedBeforePauseMs: 0,
       durationMins: 180,
+      startingCoins: 1500,
+      defaultVetoMins: 15,
       hidingMins: 45,
       hidingEndsAt: null,
       hidingRadiusM: 500,
       catchRadiusM: 100,
+      stationClaimRadiusM: 100,
+      stationPoints: 1,
+      allowStealingStations: true,
       railRushTarget: 15,
-      railRushLineBonus: 5
+      railRushLineBonus: 5,
+      flagPickupRadiusM: 100,
+      flagCapturePoints: 1,
+      checkpointRadiusM: 100,
+      checkpointPoints: 1,
+      orderedCheckpoints: false,
+      transitRates: createDefaultTransitRates()
     },
+    permissions: createDefaultPermissions(),
     teams: [
       { id: 'team-a', name: 'Team Harbour', color: '#F99D1C', role: 'hider', coins: 1500, points: 0, vetoEndsAt: 0, doubleNext: false, activeChallenge: null },
       { id: 'team-b', name: 'Team Bridge', color: '#0098CD', role: 'seeker', coins: 1500, points: 0, vetoEndsAt: 0, doubleNext: false, activeChallenge: null }
@@ -65,6 +93,8 @@ export function createInitialState() {
       [localPlayerId]: {
         id: localPlayerId,
         name: 'Player 1',
+        nameLocked: false,
+        accessLevel: 'player', // 'gm' | 'co_host' | 'player'
         teamId: 'team-a',
         isEventHost: false,
         color: '#F99D1C',
@@ -133,7 +163,13 @@ class Store {
         ...base,
         ...parsed,
         room: { ...base.room, ...(parsed.room || {}), connected: false, statusText: 'Solo / Local Mode' },
-        game: { ...base.game, ...(parsed.game || {}), rules: { ...base.game.rules, ...(parsed.game?.rules || {}) } },
+        game: {
+          ...base.game,
+          ...(parsed.game || {}),
+          rules: { ...base.game.rules, ...(parsed.game?.rules || {}) },
+          transitRates: { ...base.game.transitRates, ...(parsed.game?.transitRates || {}) }
+        },
+        permissions: { ...base.permissions, ...(parsed.permissions || {}) },
         dividingLine: { ...base.dividingLine, ...(parsed.dividingLine || {}) },
         winSectors: { ...base.winSectors, ...(parsed.winSectors || {}) },
         decks: {
@@ -150,6 +186,8 @@ class Store {
         [tabId]: {
           ...base.players[base.localPlayerId],
           name: prevPlayer?.name || 'Player 1',
+          nameLocked: Boolean(prevPlayer?.nameLocked),
+          accessLevel: prevPlayer?.isEventHost ? 'gm' : (prevPlayer?.accessLevel || 'player'),
           teamId: prevPlayer?.isEventHost ? null : (prevPlayer?.teamId || 'team-a'),
           isEventHost: Boolean(prevPlayer?.isEventHost),
           color: prevPlayer?.color || '#F99D1C',
@@ -235,6 +273,7 @@ class Store {
     return {
       updatedAt: s.updatedAt,
       game: s.game,
+      permissions: s.permissions,
       teams: s.teams,
       players: s.players,
       claimedStations: s.claimedStations,
@@ -258,7 +297,15 @@ class Store {
     this.mutate((s) => {
       const myId = s.localPlayerId;
       const myLocalPlayer = s.players[myId];
-      if (snap.game) s.game = { ...s.game, ...snap.game };
+      if (snap.game) {
+        s.game = {
+          ...s.game,
+          ...snap.game,
+          rules: { ...s.game.rules, ...(snap.game.rules || {}) },
+          transitRates: { ...s.game.transitRates, ...(snap.game.transitRates || {}) }
+        };
+      }
+      if (snap.permissions) s.permissions = { ...s.permissions, ...snap.permissions };
       if (snap.teams) s.teams = snap.teams;
       if (snap.players) {
         // Merge remote players rather than wiping active peers
@@ -272,14 +319,23 @@ class Store {
           }
         }
         if (myLocalPlayer) {
-          // Honor remote Event Host team reassignment if remote specifically updated our teamId more recently
+          // Honor remote Game Master reassignment / permission grant / name lock update if newer
           const remoteMe = snap.players[myId];
           const hostReassigned =
             remoteMe &&
             remoteMe.reassignedAt &&
             remoteMe.reassignedAt > (myLocalPlayer.reassignedAt || 0);
           nextPlayers[myId] = hostReassigned
-            ? { ...myLocalPlayer, teamId: remoteMe.teamId, isEventHost: remoteMe.isEventHost, color: remoteMe.color, reassignedAt: remoteMe.reassignedAt }
+            ? {
+                ...myLocalPlayer,
+                name: remoteMe.name || myLocalPlayer.name,
+                nameLocked: remoteMe.nameLocked !== undefined ? remoteMe.nameLocked : myLocalPlayer.nameLocked,
+                accessLevel: remoteMe.accessLevel || myLocalPlayer.accessLevel,
+                teamId: remoteMe.teamId,
+                isEventHost: Boolean(remoteMe.isEventHost),
+                color: remoteMe.color || myLocalPlayer.color,
+                reassignedAt: remoteMe.reassignedAt
+              }
             : myLocalPlayer;
         }
         s.players = nextPlayers;
@@ -320,8 +376,9 @@ class Store {
       s.activeCurses = [];
       s.activeTransitBurn = null;
       s.winSectors.labels = ['North & Beaches', 'South & Coast', 'West & Parramatta'];
+      const startCoins = Math.max(0, Number(s.game.startingCoins) || 0);
       s.teams.forEach((t) => {
-        t.coins = 1500;
+        t.coins = startCoins;
         t.points = 0;
         t.vetoEndsAt = 0;
         t.doubleNext = false;

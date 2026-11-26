@@ -241,7 +241,7 @@ export function getDividingSide(lat, lng, dividingLine) {
 }
 
 /** Calculate Rail Rush progress per line and total scores per team */
-export function computeRailRushStats(network, claimedStations, teams, lineBonus = 5) {
+export function computeRailRushStats(network, claimedStations, teams, lineBonus = 5, stationPts = 1) {
   const teamStats = {};
   for (const t of teams) {
     teamStats[t.id] = { stations: 0, completedLines: [], bonusPoints: 0, totalScore: 0 };
@@ -289,10 +289,42 @@ export function computeRailRushStats(network, claimedStations, teams, lineBonus 
   });
 
   for (const tid of Object.keys(teamStats)) {
-    teamStats[tid].totalScore = teamStats[tid].stations + teamStats[tid].bonusPoints;
+    teamStats[tid].totalScore = teamStats[tid].stations * stationPts + teamStats[tid].bonusPoints;
   }
 
   return { teamStats, lineProgress };
+}
+
+/** Check whether any Game Master currently exists in the session */
+export function hasActiveGameMaster(state) {
+  return Object.values(state.players || {}).some((p) => p && (p.isEventHost || p.accessLevel === 'gm'));
+}
+
+/** Evaluate fine-grained access permissions for the current local user */
+export function getAccess(state) {
+  const me = state.players?.[state.localPlayerId];
+  const gmExists = hasActiveGameMaster(state);
+  const isGm = Boolean(me?.isEventHost || me?.accessLevel === 'gm');
+  const isPermitted = isGm || me?.accessLevel === 'co_host';
+  const perms = state.permissions || {};
+
+  // If no GM exists in the session (solo / casual group play), everyone has normal access;
+  // Once a GM exists, standard players are restricted according to GM permission locks!
+  const restricted = gmExists && !isPermitted;
+
+  return {
+    gmExists,
+    isGm,
+    isPermitted,
+    canEditRules: !restricted || !perms.lockRulesToGm,
+    canEditScores: !restricted || !perms.lockScoresToGm,
+    canEditTeams: !restricted || !perms.lockTeamsToGm,
+    canEditDeck: !restricted || !perms.lockDeckToGm,
+    canClaimGm: isGm || !gmExists,
+    canUseDemoGps: isGm || Boolean(perms.allowDemoGps) || (!gmExists && !state.room?.connected),
+    mustVerifyGps: !isGm && Boolean(perms.strictGpsProximity),
+    canRenameSelf: isGm || !me?.nameLocked || !perms.lockNamesAfterJoin
+  };
 }
 
 /** Determine whether player `targetPlayer` GPS should be visible to `viewerPlayer` */

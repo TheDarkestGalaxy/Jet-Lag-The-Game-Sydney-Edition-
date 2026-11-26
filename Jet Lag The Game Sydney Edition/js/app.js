@@ -1,7 +1,7 @@
 // Jet Lag: Sydney Edition — Mobile-First Main Application Orchestrator
 import { SYDNEY_NETWORK } from '../data/sydney-network.js';
-import { CHALLENGE_CATEGORIES, POWERUPS_SHOP, TRANSIT_RATES, DEFAULT_CHALLENGES, DEFAULT_CURSES } from '../data/challenges.js?v=9';
-import { store, uid } from './state.js?v=9';
+import { CHALLENGE_CATEGORIES, POWERUPS_SHOP, TRANSIT_RATES, DEFAULT_CHALLENGES, DEFAULT_CURSES } from '../data/challenges.js?v=11';
+import { store, uid } from './state.js?v=11';
 import {
   GAME_MODES,
   RULE_MODULES,
@@ -9,14 +9,16 @@ import {
   RACE_PRESETS,
   getDefaultRulesForMode,
   computeRailRushStats,
+  haversineM,
   formatDistance,
   formatClock,
-  getDividingSide
-} from './modes.js?v=9';
-import { SydneyMapController } from './map.js?v=9';
-import { ChallengeWheel } from './wheel.js?v=9';
-import { MultiplayerManager, generateRoomCode, normalizeRoomCode, compressImageFile } from './multiplayer.js?v=9';
-import { icon } from './icons.js?v=9';
+  getDividingSide,
+  getAccess
+} from './modes.js?v=11';
+import { SydneyMapController } from './map.js?v=11';
+import { ChallengeWheel } from './wheel.js?v=11';
+import { MultiplayerManager, generateRoomCode, normalizeRoomCode, compressImageFile } from './multiplayer.js?v=11';
+import { icon } from './icons.js?v=11';
 
 function esc(str) {
   return String(str ?? '')
@@ -139,7 +141,7 @@ class JetLagSydneyApp {
           caches.keys().then((keys) => keys.forEach((k) => caches.delete(k))).catch(() => {});
         }
       } else if (location.protocol === 'https:') {
-        navigator.serviceWorker.register('./sw.js?v=9').then((reg) => reg.update()).catch(() => {});
+        navigator.serviceWorker.register('./sw.js?v=11').then((reg) => reg.update()).catch(() => {});
       }
     }
 
@@ -489,6 +491,7 @@ class JetLagSydneyApp {
       this.toast('Shuffled wheel slices from active deck.');
     });
     document.getElementById('btn-wheel-quick-create').addEventListener('click', () => {
+      if (!getAccess(store.get()).canEditDeck) return this.toast('Challenge deck is locked by the Game Master.');
       this.openAddCardModal(this.wheelMode === 'curses' ? 'curse' : 'challenge');
     });
 
@@ -701,6 +704,9 @@ class JetLagSydneyApp {
   }
 
   toggleGameClock() {
+    if (!getAccess(store.get()).canEditRules) {
+      return this.toast('Only the Game Master (or permitted Co-Host) can control the game clock.');
+    }
     store.mutate((s) => {
       const now = Date.now();
       if (s.game.status === 'running') {
@@ -727,30 +733,37 @@ class JetLagSydneyApp {
     const mode = GAME_MODES[s.game.mode] || GAME_MODES.custom;
     const myTeam = store.getLocalTeam();
     const myPlayer = store.getLocalPlayer();
-    const isHostGm = Boolean(myPlayer?.isEventHost);
+    const access = getAccess(s);
+    const isHostGm = access.isGm;
     const rrData = s.game.rules.stationClaiming
-      ? computeRailRushStats(SYDNEY_NETWORK, s.claimedStations, s.teams, s.game.railRushLineBonus)
+      ? computeRailRushStats(SYDNEY_NETWORK, s.claimedStations, s.teams, s.game.railRushLineBonus, s.game.stationPoints || 1)
       : null;
 
-    // 0. Event Host (Non-Playing Game Master) Console
+    // 0. Event Host (Non-Playing Game Master) Console or Managed-Game Notice
     let html = '';
     if (isHostGm) {
       html += `
         <div class="card host-card">
           <div class="row-between">
             <div class="row" style="gap:7px">
-              <span class="host-pill">EVENT HOST</span>
-              <strong style="font-family:var(--font-display)">Game Master Console</strong>
+              <span class="host-pill">GAME MASTER</span>
+              <strong style="font-family:var(--font-display)">Host Control Console</strong>
             </div>
-            <button class="btn btn-xs btn-secondary" id="btn-gm-exit">Join as Player</button>
+            <button class="btn btn-xs btn-secondary" id="btn-gm-exit">Step Down</button>
           </div>
           <div class="muted" style="font-size:11.5px">
-            Spectating without playing — you see every player's live GPS and private hiding zones, while your own pin stays hidden from competitors.
+            Full GM authority active — players cannot alter locked rules, scores, teams, names, or bypass GPS checks unless you grant permission in the Live tab.
           </div>
           <div class="row" style="gap:6px">
             <input type="text" id="gm-broadcast-input" class="input" placeholder="Send live announcement to all players..." style="flex:1;padding:7px 10px;font-size:13px" />
             <button class="btn btn-primary btn-sm" id="btn-gm-broadcast">Broadcast</button>
           </div>
+        </div>
+      `;
+    } else if (access.gmExists) {
+      html += `
+        <div class="sp-badge" style="border-color:#a855f7;color:#c084fc;display:flex;align-items:center;justify-content:space-between;gap:8px">
+          <span>${access.isPermitted ? 'Permitted Co-Host — elevated controls enabled' : 'Game Master Active — rules, scores & GPS checks enforced'}</span>
         </div>
       `;
     }
@@ -786,13 +799,13 @@ class JetLagSydneyApp {
             <strong style="font-family:var(--font-display);font-size:15px">${esc(mode.name)}</strong>
           </div>
           <div class="row" style="gap:5px">
-            <button class="btn btn-xs btn-secondary" id="btn-toggle-modes">${this.showModePicker ? 'Done' : 'Change'}</button>
-            <button class="btn btn-xs btn-ghost" id="btn-toggle-rules" title="Customise rules">${icon('sliders', 13)}</button>
-            <button class="btn btn-xs btn-danger" id="btn-reset-game">Reset</button>
+            ${access.canEditRules ? `<button class="btn btn-xs btn-secondary" id="btn-toggle-modes">${this.showModePicker ? 'Done' : 'Change'}</button>` : ''}
+            <button class="btn btn-xs ${this.showRulesConfig ? 'btn-primary' : 'btn-ghost'}" id="btn-toggle-rules" title="Game Rules & Parameters">${icon('sliders', 13)} Rules</button>
+            ${access.canEditRules ? `<button class="btn btn-xs btn-danger" id="btn-reset-game">Reset</button>` : ''}
           </div>
         </div>
         ${
-          this.showModePicker
+          this.showModePicker && access.canEditRules
             ? `<div class="mode-grid">
                 ${Object.values(GAME_MODES)
                   .map(
@@ -809,36 +822,154 @@ class JetLagSydneyApp {
               </div>`
             : `<div class="muted" style="font-size:12px">${esc(mode.tagline)}</div>`
         }
-        <div class="row">
-          <button class="btn btn-primary btn-sm" id="btn-game-start-pause" style="flex:1">
-            ${icon(s.game.status === 'running' ? 'pause' : 'play', 13)}
-            ${s.game.status === 'running' ? 'Pause Clock' : s.game.status === 'paused' ? 'Resume Clock' : 'Start Clock'}
-          </button>
-          ${
-            s.game.rules.hideSeekQA
-              ? `<button class="btn btn-accent btn-sm" id="btn-start-hiding-timer">${s.game.hidingMins}m Hide Timer</button>`
-              : ''
-          }
-        </div>
+        ${
+          access.canEditRules
+            ? `<div class="row">
+                <button class="btn btn-primary btn-sm" id="btn-game-start-pause" style="flex:1">
+                  ${icon(s.game.status === 'running' ? 'pause' : 'play', 13)}
+                  ${s.game.status === 'running' ? 'Pause Clock' : s.game.status === 'paused' ? 'Resume Clock' : 'Start Clock'}
+                </button>
+                ${
+                  s.game.rules.hideSeekQA
+                    ? `<button class="btn btn-accent btn-sm" id="btn-start-hiding-timer">${s.game.hidingMins}m Hide Timer</button>`
+                    : ''
+                }
+              </div>`
+            : ''
+        }
       </div>
     `;
 
-    if (this.showRulesConfig || s.game.mode === 'custom') {
+    if (this.showRulesConfig || (s.game.mode === 'custom' && access.canEditRules)) {
+      const dis = access.canEditRules ? '' : 'disabled';
+      const perms = s.permissions || {};
+      const trMap = s.game.transitRates || {};
       html += `
         <div class="card">
           <div class="card-header">
-            <div class="card-title">Modular Rules</div>
-            <span class="muted">Toggle any feature</span>
+            <div class="card-title">Custom Rules & Parameters</div>
+            <span class="tag-pill">${access.canEditRules ? 'EDITABLE' : 'VIEW ONLY'}</span>
           </div>
-          <div>
+
+          <!-- Universal Economy & Clock -->
+          <div class="grid-2">
+            <div class="field">
+              <label>Starting Coins</label>
+              <input type="number" class="input" data-cfg-num="startingCoins" value="${s.game.startingCoins ?? 1500}" min="0" step="50" ${dis} />
+            </div>
+            <div class="field">
+              <label>Game Duration (mins)</label>
+              <input type="number" class="input" data-cfg-num="durationMins" value="${s.game.durationMins ?? 180}" min="10" step="10" ${dis} />
+            </div>
+          </div>
+          ${
+            access.canEditRules
+              ? `<button class="btn btn-secondary btn-xs" id="btn-apply-start-coins">Apply ${s.game.startingCoins ?? 1500} Starting Coins to All Teams</button>`
+              : ''
+          }
+
+          <!-- Rail Rush Parameters -->
+          <div style="border-top:1px solid var(--border);padding-top:8px;display:flex;flex-direction:column;gap:7px">
+            <strong style="font-size:12px;color:var(--accent)">Rail Rush Rules</strong>
+            <div class="grid-2">
+              <div class="field">
+                <label>Claim GPS Radius (m)</label>
+                <input type="number" class="input" data-cfg-num="stationClaimRadiusM" value="${s.game.stationClaimRadiusM ?? 100}" min="25" max="2000" step="25" ${dis} />
+              </div>
+              <div class="field">
+                <label>Points per Station</label>
+                <input type="number" class="input" data-cfg-num="stationPoints" value="${s.game.stationPoints ?? 1}" min="1" max="50" ${dis} />
+              </div>
+              <div class="field">
+                <label>Completed Line Bonus</label>
+                <input type="number" class="input" data-cfg-num="railRushLineBonus" value="${s.game.railRushLineBonus ?? 5}" min="0" max="100" ${dis} />
+              </div>
+              <div class="field">
+                <label>Default Veto (mins)</label>
+                <input type="number" class="input" data-cfg-num="defaultVetoMins" value="${s.game.defaultVetoMins ?? 15}" min="1" max="120" ${dis} />
+              </div>
+            </div>
+            <label class="toggle-row" style="padding:4px 0">
+              <span style="font-size:12px;font-weight:600">Allow Stealing Already-Claimed Stations</span>
+              <input type="checkbox" data-cfg-bool="allowStealingStations" ${s.game.allowStealingStations !== false ? 'checked' : ''} ${dis} />
+            </label>
+          </div>
+
+          <!-- Hide + Seek & Tag Parameters -->
+          <div style="border-top:1px solid var(--border);padding-top:8px;display:flex;flex-direction:column;gap:7px">
+            <strong style="font-size:12px;color:var(--accent-2)">Hide + Seek & Tag Rules</strong>
+            <div class="grid-2">
+              <div class="field">
+                <label>Hiding Time (mins)</label>
+                <input type="number" class="input" data-cfg-num="hidingMins" value="${s.game.hidingMins ?? 45}" min="5" max="180" ${dis} />
+              </div>
+              <div class="field">
+                <label>Hiding Zone Radius (m)</label>
+                <input type="number" class="input" data-cfg-num="hidingRadiusM" value="${s.game.hidingRadiusM ?? 500}" min="100" max="5000" step="100" ${dis} />
+              </div>
+              <div class="field">
+                <label>Tag Catch Radius (m)</label>
+                <input type="number" class="input" data-cfg-num="catchRadiusM" value="${s.game.catchRadiusM ?? 100}" min="10" max="1000" step="10" ${dis} />
+              </div>
+              <div class="field">
+                <label>Flag / Checkpoint Radius (m)</label>
+                <input type="number" class="input" data-cfg-num="checkpointRadiusM" value="${s.game.checkpointRadiusM ?? 100}" min="25" max="2000" step="25" ${dis} />
+              </div>
+            </div>
+            <label class="toggle-row" style="padding:4px 0">
+              <span style="font-size:12px;font-weight:600">Require Ordered Race Checkpoints (#1, #2, #3)</span>
+              <input type="checkbox" data-cfg-bool="orderedCheckpoints" ${s.game.orderedCheckpoints ? 'checked' : ''} ${dis} />
+            </label>
+            <div class="field">
+              <label>Transit Coin Costs (per min)</label>
+              <div class="grid-2" style="gap:6px">
+                ${TRANSIT_RATES.map(
+                  (tr) => `
+                  <div class="row-between" style="background:var(--bg);padding:5px 8px;border-radius:8px;border:1px solid var(--border)">
+                    <span style="font-size:11px;font-weight:700">${tr.mode.replace('_', ' ').toUpperCase()}</span>
+                    <input type="number" data-transit-rate="${tr.mode}" value="${trMap[tr.mode] ?? tr.coinsPerMin}" min="0" step="5" style="width:62px;background:var(--bg-card);border:1px solid var(--border-strong);border-radius:6px;padding:3px 6px;font-size:12px;text-align:right" ${dis} />
+                  </div>`
+                ).join('')}
+              </div>
+            </div>
+          </div>
+
+          <!-- Access Control & Anti-Cheat (GM Authority) -->
+          <div style="border-top:1px solid var(--border);padding-top:8px;display:flex;flex-direction:column;gap:4px">
+            <strong style="font-size:12px;color:#c084fc">Access Levels & Anti-Cheat</strong>
+            ${[
+              ['strictGpsProximity', 'Strict GPS Proximity Checks', 'Disable claiming stations/checkpoints unless physically within radius'],
+              ['lockNamesAfterJoin', 'Lock Player Names', 'Players cannot rename themselves after locking/joining'],
+              ['lockRulesToGm', 'Lock Rules & Clock to GM', 'Only Game Master or Permitted Co-Hosts can edit rules/mode/clock'],
+              ['lockScoresToGm', 'Lock Score & Coin Overrides', 'Prevent players from manually adding/removing coins or points'],
+              ['lockTeamsToGm', 'Lock Teams & Roles to GM', 'Prevent players from switching teams or roles mid-game'],
+              ['lockDeckToGm', 'Lock Challenge Deck to GM', 'Prevent players from editing or deleting challenges'],
+              ['allowDemoGps', 'Allow Demo GPS Pins', 'Enable only for indoor testing — keep OFF for real games']
+            ]
+              .map(
+                ([k, lbl, desc]) => `
+                <label class="toggle-row">
+                  <div>
+                    <div style="font-size:12px;font-weight:700">${lbl}</div>
+                    <div class="muted" style="font-size:10.5px">${desc}</div>
+                  </div>
+                  <input type="checkbox" data-perm-toggle="${k}" ${perms[k] ? 'checked' : ''} ${access.isGm || !access.gmExists ? '' : 'disabled'} />
+                </label>`
+              )
+              .join('')}
+          </div>
+
+          <!-- Modular Feature Toggles -->
+          <div style="border-top:1px solid var(--border);padding-top:8px">
+            <strong style="font-size:12px;color:var(--text-muted)">Enabled Mode Modules</strong>
             ${RULE_MODULES.map(
               (rm) => `
               <label class="toggle-row">
                 <div>
-                  <div style="font-size:12.5px;font-weight:700">${esc(rm.label)}</div>
-                  <div class="muted" style="font-size:11px">${esc(rm.desc)}</div>
+                  <div style="font-size:12px;font-weight:700">${esc(rm.label)}</div>
+                  <div class="muted" style="font-size:10.5px">${esc(rm.desc)}</div>
                 </div>
-                <input type="checkbox" data-rule-toggle="${rm.key}" ${s.game.rules[rm.key] ? 'checked' : ''} />
+                <input type="checkbox" data-rule-toggle="${rm.key}" ${s.game.rules[rm.key] ? 'checked' : ''} ${dis} />
               </label>`
             ).join('')}
           </div>
@@ -947,9 +1078,10 @@ class JetLagSydneyApp {
               : `
                 <div class="muted" style="font-size:11.5px">Tap onto transit to track live coin burn:</div>
                 <div class="row">
-                  ${TRANSIT_RATES.map(
-                    (tr) => `<button class="btn btn-xs btn-secondary" data-start-burn="${tr.mode}" style="border-color:${tr.color}">${tr.mode.replace('_', ' ').toUpperCase()} (${tr.coinsPerMin}/m)</button>`
-                  ).join('')}
+                  ${TRANSIT_RATES.map((tr) => {
+                    const rate = s.game.transitRates?.[tr.mode] ?? tr.coinsPerMin;
+                    return `<button class="btn btn-xs btn-secondary" data-start-burn="${tr.mode}" style="border-color:${tr.color}">${tr.mode.replace('_', ' ').toUpperCase()} (${rate}/m)</button>`;
+                  }).join('')}
                 </div>
               `
             : ''
@@ -988,7 +1120,7 @@ class JetLagSydneyApp {
         <div class="card">
           <div class="card-header">
             <div class="card-title">Rail Rush Control</div>
-            <span class="tag-pill">+${s.game.railRushLineBonus} Line Bonus</span>
+            <span class="tag-pill">${s.game.stationClaimRadiusM ?? 100}m GPS · +${s.game.railRushLineBonus} Bonus</span>
           </div>
           <button class="btn btn-primary btn-sm btn-block" id="btn-gps-checkin">${icon('crosshair', 13)} GPS Check-In Nearest Station</button>
           <div class="grid-2">
@@ -1139,8 +1271,8 @@ class JetLagSydneyApp {
         <div class="card-header">
           <div class="card-title">Teams & Scoreboard</div>
           <div class="row" style="gap:5px">
-            ${!isHostGm ? `<button class="btn btn-xs btn-ghost" id="btn-gm-enter">Host Event (GM)</button>` : ''}
-            <button class="btn btn-xs btn-secondary" id="btn-add-team">+ Add Team</button>
+            ${access.canClaimGm && !isHostGm ? `<button class="btn btn-xs btn-ghost" id="btn-gm-enter">Host Event (GM)</button>` : ''}
+            ${access.canEditTeams ? `<button class="btn btn-xs btn-secondary" id="btn-add-team">+ Add Team</button>` : ''}
           </div>
         </div>
         ${s.teams
@@ -1157,13 +1289,17 @@ class JetLagSydneyApp {
                     ${isMine ? '<span class="tag-pill" style="border-color:var(--accent);color:var(--accent)">YOU</span>' : ''}
                   </div>
                   <div class="row">
-                    <select class="select" data-team-role="${t.id}" style="width:auto;padding:3px 7px;font-size:11px">
-                      ${['hider', 'seeker', 'runner', 'chaser', 'north', 'south', 'racer', 'team']
-                        .map((r) => `<option value="${r}" ${t.role === r ? 'selected' : ''}>${r.toUpperCase()}</option>`)
-                        .join('')}
-                    </select>
-                    ${!isMine && !isHostGm ? `<button class="btn btn-xs btn-ghost" data-join-team="${t.id}">Join</button>` : ''}
-                    <button class="btn btn-xs btn-ghost" data-edit-team="${t.id}" title="Rename team">${icon('edit', 12)}</button>
+                    ${
+                      access.canEditTeams
+                        ? `<select class="select" data-team-role="${t.id}" style="width:auto;padding:3px 7px;font-size:11px">
+                            ${['hider', 'seeker', 'runner', 'chaser', 'north', 'south', 'racer', 'team']
+                              .map((r) => `<option value="${r}" ${t.role === r ? 'selected' : ''}>${r.toUpperCase()}</option>`)
+                              .join('')}
+                          </select>`
+                        : `<span class="tag-pill">${esc((t.role || 'team').toUpperCase())}</span>`
+                    }
+                    ${!isMine && !isHostGm && access.canEditTeams ? `<button class="btn btn-xs btn-ghost" data-join-team="${t.id}">Join</button>` : ''}
+                    ${access.canEditTeams ? `<button class="btn btn-xs btn-ghost" data-edit-team="${t.id}" title="Rename team">${icon('edit', 12)}</button>` : ''}
                   </div>
                 </div>
                 <div class="team-stat-row">
@@ -1172,13 +1308,17 @@ class JetLagSydneyApp {
                   ${rrScore ? `<span class="stat-pill">${rrScore.stations} stops</span>` : ''}
                   <span class="muted" style="font-size:11.5px">${members.length ? members.map((m) => esc(m.name)).join(', ') : 'No players'}</span>
                 </div>
-                ${vetoRem > 0 ? `<div class="sp-badge" style="border-color:#ef4444;color:#f87171">Veto Cooldown: <span data-countdown-until="${t.vetoEndsAt}">${formatClock(vetoRem)}</span> ${isHostGm ? `<button class="btn btn-xs btn-ghost" data-gm-clear-veto="${t.id}" style="margin-left:6px">Clear</button>` : ''}</div>` : ''}
+                ${vetoRem > 0 ? `<div class="sp-badge" style="border-color:#ef4444;color:#f87171">Veto Cooldown: <span data-countdown-until="${t.vetoEndsAt}">${formatClock(vetoRem)}</span> ${access.canEditScores ? `<button class="btn btn-xs btn-ghost" data-gm-clear-veto="${t.id}" style="margin-left:6px">Clear</button>` : ''}</div>` : ''}
                 ${t.doubleNext ? `<div class="sp-badge" style="border-color:#F99D1C;color:#F99D1C">2X Double Next Challenge Active</div>` : ''}
-                <div class="row">
-                  <button class="btn btn-xs btn-ghost" data-pts-delta="${t.id}:1">+1 pt</button>
-                  <button class="btn btn-xs btn-ghost" data-pts-delta="${t.id}:-1">-1 pt</button>
-                  ${s.game.rules.economy ? `<button class="btn btn-xs btn-ghost" data-coins-delta="${t.id}:250">+250</button><button class="btn btn-xs btn-ghost" data-coins-delta="${t.id}:-250">-250</button>` : ''}
-                </div>
+                ${
+                  access.canEditScores
+                    ? `<div class="row">
+                        <button class="btn btn-xs btn-ghost" data-pts-delta="${t.id}:1">+1 pt</button>
+                        <button class="btn btn-xs btn-ghost" data-pts-delta="${t.id}:-1">-1 pt</button>
+                        ${s.game.rules.economy ? `<button class="btn btn-xs btn-ghost" data-coins-delta="${t.id}:250">+250</button><button class="btn btn-xs btn-ghost" data-coins-delta="${t.id}:-250">-250</button>` : ''}
+                      </div>`
+                    : ''
+                }
               </div>
             `;
           })
@@ -1278,11 +1418,67 @@ class JetLagSydneyApp {
 
     pane.querySelectorAll('[data-rule-toggle]').forEach((cb) => {
       cb.addEventListener('change', () => {
+        if (!getAccess(store.get()).canEditRules) return;
         const key = cb.dataset.ruleToggle;
         store.mutate((s) => {
           s.game.rules[key] = cb.checked;
           if (key === 'dividingLine') s.dividingLine.enabled = cb.checked;
           if (key === 'winSectors') s.winSectors.enabled = cb.checked;
+        }, 'rules');
+      });
+    });
+
+    pane.querySelectorAll('[data-cfg-num]').forEach((inp) => {
+      inp.addEventListener('change', () => {
+        if (!getAccess(store.get()).canEditRules) return;
+        const key = inp.dataset.cfgNum;
+        const val = Math.max(0, Number(inp.value) || 0);
+        store.mutate((s) => {
+          s.game[key] = val;
+          if (key === 'checkpointRadiusM') s.game.flagPickupRadiusM = val;
+          if (key === 'hidingRadiusM' && s.hidingZone) s.hidingZone.radiusM = val;
+        }, 'rules');
+      });
+    });
+
+    pane.querySelectorAll('[data-cfg-bool]').forEach((cb) => {
+      cb.addEventListener('change', () => {
+        if (!getAccess(store.get()).canEditRules) return;
+        const key = cb.dataset.cfgBool;
+        store.mutate((s) => { s.game[key] = cb.checked; }, 'rules');
+      });
+    });
+
+    pane.querySelectorAll('[data-transit-rate]').forEach((inp) => {
+      inp.addEventListener('change', () => {
+        if (!getAccess(store.get()).canEditRules) return;
+        const mode = inp.dataset.transitRate;
+        const val = Math.max(0, Number(inp.value) || 0);
+        store.mutate((s) => {
+          if (!s.game.transitRates) s.game.transitRates = {};
+          s.game.transitRates[mode] = val;
+        }, 'rules');
+      });
+    });
+
+    pane.querySelector('#btn-apply-start-coins')?.addEventListener('click', () => {
+      if (!getAccess(store.get()).canEditRules) return;
+      const amt = Math.max(0, Number(store.get().game.startingCoins) || 0);
+      store.mutate((s) => {
+        s.teams.forEach((t) => { t.coins = amt; });
+      }, 'score');
+      store.addFeed({ type: 'system', text: `set all teams to ${amt} starting coins.` });
+      this.toast(`Set all teams to ${amt} coins.`);
+    });
+
+    pane.querySelectorAll('[data-perm-toggle]').forEach((cb) => {
+      cb.addEventListener('change', () => {
+        const acc = getAccess(store.get());
+        if (!acc.isGm && acc.gmExists) return;
+        const key = cb.dataset.permToggle;
+        store.mutate((s) => {
+          if (!s.permissions) s.permissions = {};
+          s.permissions[key] = cb.checked;
         }, 'rules');
       });
     });
@@ -1460,11 +1656,12 @@ class JetLagSydneyApp {
       btn.addEventListener('click', () => {
         const tr = TRANSIT_RATES.find((r) => r.mode === btn.dataset.startBurn);
         if (!tr) return;
+        const customRate = store.get().game.transitRates?.[tr.mode] ?? tr.coinsPerMin;
         const targetTeam = this.getActionTeam();
         store.mutate((s) => {
-          s.activeTransitBurn = { ...tr, startedAt: Date.now(), teamId: targetTeam.id };
+          s.activeTransitBurn = { ...tr, coinsPerMin: customRate, startedAt: Date.now(), teamId: targetTeam.id };
         }, 'burn');
-        store.addFeed({ type: 'system', text: `tapped onto ${tr.label} for ${targetTeam.name} (${tr.coinsPerMin} coins/min).` });
+        store.addFeed({ type: 'system', text: `tapped onto ${tr.label} for ${targetTeam.name} (${customRate} coins/min).` });
       });
     });
 
@@ -1491,12 +1688,17 @@ class JetLagSydneyApp {
 
     // Rail Rush
     pane.querySelector('#btn-gps-checkin')?.addEventListener('click', () => {
+      const s = store.get();
+      const access = getAccess(s);
       const p = store.getLocalPlayer();
-      if (p?.lat == null) return this.toast('Turn on GPS or place a Demo Pin in the Live tab first.');
+      if (p?.lat == null) {
+        return this.toast(access.canUseDemoGps ? 'Turn on Live GPS (or place a Demo Pin in the Live tab) first.' : 'Live GPS fix required to check in at a station.');
+      }
       const res = this.mapCtrl.findNearestStation(p.lat, p.lng);
       if (!res) return;
-      if (res.distanceM > 500) {
-        if (!confirm(`Nearest station is ${res.station.name} (${formatDistance(res.distanceM)} away). Claim it anyway?`)) return;
+      const maxM = Number(s.game.stationClaimRadiusM) || 100;
+      if (access.mustVerifyGps && res.distanceM > maxM) {
+        return this.toast(`Too far from ${res.station.name} (${formatDistance(res.distanceM)} away — must be within ${maxM}m).`);
       }
       this.toggleStationClaim(res.station, true);
       this.mapCtrl.flyToStation(res.station.id);
@@ -1583,6 +1785,10 @@ class JetLagSydneyApp {
 
   // ===== GAME ACTION HELPERS =====
   setEventHostMode(enabled) {
+    const access = getAccess(store.get());
+    if (enabled && !access.canClaimGm) {
+      return this.toast('A Game Master is already active. Ask them to grant you Co-Host permission.');
+    }
     if (enabled && store.get().room.shareGps) {
       this.mp.stopGps();
     }
@@ -1590,6 +1796,7 @@ class JetLagSydneyApp {
       const p = s.players[s.localPlayerId];
       if (!p) return;
       p.isEventHost = Boolean(enabled);
+      p.accessLevel = enabled ? 'gm' : 'player';
       if (enabled) {
         p.teamId = null;
         p.gpsHidden = true;
@@ -1600,7 +1807,7 @@ class JetLagSydneyApp {
         p.gpsHidden = false;
       }
     }, 'profile');
-    this.toast(enabled ? 'Switched to Event Host (Non-Playing GM) mode.' : 'Switched back to Playing mode.');
+    this.toast(enabled ? 'Switched to Game Master (Non-Playing Host) mode.' : 'Switched back to Playing mode.');
   }
 
   getActionTeam(overrideTeamId = null) {
@@ -1610,13 +1817,33 @@ class JetLagSydneyApp {
   }
 
   toggleStationClaim(station, claim, overrideTeamId = null) {
+    const s = store.get();
+    const access = getAccess(s);
     const targetTeam = this.getActionTeam(overrideTeamId);
     const myPlayer = store.getLocalPlayer();
-    store.mutate((s) => {
+
+    if (claim && !access.isGm) {
+      const existing = s.claimedStations?.[station.id];
+      if (existing && existing.teamId !== targetTeam?.id && s.game.allowStealingStations === false) {
+        return this.toast(`${station.name} is already claimed (stealing disabled).`);
+      }
+      if (access.mustVerifyGps) {
+        const maxM = Number(s.game.stationClaimRadiusM) || 100;
+        if (myPlayer?.lat == null) {
+          return this.toast(`Live GPS required to claim ${station.name} (must be within ${maxM}m).`);
+        }
+        const dist = haversineM(myPlayer.lat, myPlayer.lng, station.lat, station.lng);
+        if (dist > maxM) {
+          return this.toast(`Too far from ${station.name} (${formatDistance(dist)} away — limit is ${maxM}m).`);
+        }
+      }
+    }
+
+    store.mutate((st) => {
       if (claim && targetTeam) {
-        s.claimedStations[station.id] = { teamId: targetTeam.id, playerId: myPlayer.id, playerName: myPlayer.name, claimedAt: Date.now() };
+        st.claimedStations[station.id] = { teamId: targetTeam.id, playerId: myPlayer.id, playerName: myPlayer.name, claimedAt: Date.now() };
       } else {
-        delete s.claimedStations[station.id];
+        delete st.claimedStations[station.id];
       }
     }, 'claim');
     store.addFeed({
@@ -1675,23 +1902,51 @@ class JetLagSydneyApp {
   }
 
   toggleCheckpointDone(cpId) {
+    const s = store.get();
+    const access = getAccess(s);
     const myTeam = this.getActionTeam();
+    const myPlayer = store.getLocalPlayer();
+    const cpIdx = s.checkpoints.findIndex((c) => c.id === cpId);
+    const cpObj = s.checkpoints[cpIdx];
+    if (!cpObj) return;
+
+    const alreadyDone = Boolean(cpObj.completedBy?.[myTeam.id]);
+    if (!alreadyDone && !access.isGm) {
+      if (s.game.orderedCheckpoints && cpIdx > 0) {
+        const prevDone = Boolean(s.checkpoints[cpIdx - 1]?.completedBy?.[myTeam.id]);
+        if (!prevDone) {
+          return this.toast(`Ordered Race: complete Checkpoint #${cpIdx} (${s.checkpoints[cpIdx - 1].name}) first.`);
+        }
+      }
+      if (access.mustVerifyGps) {
+        const maxM = Number(s.game.checkpointRadiusM) || 100;
+        if (myPlayer?.lat == null) return this.toast(`Live GPS required to check in at ${cpObj.name}.`);
+        const dist = haversineM(myPlayer.lat, myPlayer.lng, cpObj.lat, cpObj.lng);
+        if (dist > maxM) {
+          return this.toast(`Too far from ${cpObj.name} (${formatDistance(dist)} away — must be within ${maxM}m).`);
+        }
+      }
+    }
+
+    const pts = Math.max(0, Number(s.game.checkpointPoints) || 1);
     let cpName = '';
     let nowDone = false;
-    store.mutate((s) => {
-      const cp = s.checkpoints.find((c) => c.id === cpId);
+    store.mutate((st) => {
+      const cp = st.checkpoints.find((c) => c.id === cpId);
       if (!cp) return;
       cpName = cp.name;
       if (!cp.completedBy) cp.completedBy = {};
       if (cp.completedBy[myTeam.id]) {
+        if (!access.canEditScores) return;
         delete cp.completedBy[myTeam.id];
       } else {
         cp.completedBy[myTeam.id] = Date.now();
-        myTeam.points += 1;
+        const tm = st.teams.find((x) => x.id === myTeam.id);
+        if (tm) tm.points += pts;
         nowDone = true;
       }
     }, 'race');
-    if (nowDone) store.addFeed({ type: 'challenge', text: `cleared Race Checkpoint: ${cpName} (+1 pt).` });
+    if (nowDone) store.addFeed({ type: 'challenge', text: `cleared Race Checkpoint: ${cpName} (+${pts} pt).` });
   }
 
   answerQuestion(qaId, answer) {
@@ -1989,86 +2244,95 @@ class JetLagSydneyApp {
       });
     }
 
-    // Custom Deck Builder Sub-view (Inline Creator + Full Edit/Delete + JSON Sync)
+    // Custom Deck Builder Sub-view (Locked when GM restricts deck editing)
     const deckSlot = document.getElementById('wsub-deck');
     if (deckSlot) {
+      const access = getAccess(s);
       const isCh = this.deckKind === 'challenges';
       const list = isCh ? s.decks.challenges : s.decks.curses;
       deckSlot.innerHTML = `
-        <div class="card">
-          <div class="card-header">
-            <div class="card-title">Create Custom ${isCh ? 'Challenge' : 'Curse'}</div>
-            <div class="row" style="gap:4px">
-              <button class="btn btn-xs ${isCh ? 'btn-primary' : 'btn-ghost'}" data-deck-kind="challenges">Challenges (${s.decks.challenges.length})</button>
-              <button class="btn btn-xs ${!isCh ? 'btn-primary' : 'btn-ghost'}" data-deck-kind="curses">Curses (${s.decks.curses.length})</button>
-            </div>
-          </div>
-          <div class="field">
-            <label>Title</label>
-            <input type="text" id="qc-title" class="input" placeholder="${isCh ? 'e.g. Touch the Water at Manly' : 'e.g. Curse of the Slow Train'}" />
-          </div>
-          <div class="field">
-            <label>Rules / Description</label>
-            <textarea id="qc-desc" class="textarea" placeholder="What do players need to do to complete or prove it?"></textarea>
-          </div>
-          <div class="grid-2">
-            <div class="field">
-              <label>${isCh ? 'Reward (Coins)' : 'Cost (Coins)'}</label>
-              <input type="number" id="qc-coins" class="input" value="500" min="0" step="50" />
-            </div>
-            <div class="field">
-              <label>${isCh ? 'Veto Penalty (Mins)' : 'Duration (Mins)'}</label>
-              <input type="number" id="qc-mins" class="input" value="15" min="1" />
-            </div>
-          </div>
-          ${
-            isCh
-              ? `<div class="grid-2">
+        ${
+          access.canEditDeck
+            ? `<div class="card">
+                <div class="card-header">
+                  <div class="card-title">Create Custom ${isCh ? 'Challenge' : 'Curse'}</div>
+                  <div class="row" style="gap:4px">
+                    <button class="btn btn-xs ${isCh ? 'btn-primary' : 'btn-ghost'}" data-deck-kind="challenges">Challenges (${s.decks.challenges.length})</button>
+                    <button class="btn btn-xs ${!isCh ? 'btn-primary' : 'btn-ghost'}" data-deck-kind="curses">Curses (${s.decks.curses.length})</button>
+                  </div>
+                </div>
+                <div class="field">
+                  <label>Title</label>
+                  <input type="text" id="qc-title" class="input" placeholder="${isCh ? 'e.g. Touch the Water at Manly' : 'e.g. Curse of the Slow Train'}" />
+                </div>
+                <div class="field">
+                  <label>Rules / Description</label>
+                  <textarea id="qc-desc" class="textarea" placeholder="What do players need to do to complete or prove it?"></textarea>
+                </div>
+                <div class="grid-2">
                   <div class="field">
-                    <label>Category</label>
-                    <select id="qc-cat" class="select">${CHALLENGE_CATEGORIES.map((c) => `<option value="${c.id}">${c.label}</option>`).join('')}</select>
+                    <label>${isCh ? 'Reward (Coins)' : 'Cost (Coins)'}</label>
+                    <input type="number" id="qc-coins" class="input" value="500" min="0" step="50" />
                   </div>
                   <div class="field">
-                    <label>Difficulty</label>
-                    <select id="qc-diff" class="select"><option>Easy</option><option selected>Medium</option><option>Hard</option></select>
+                    <label>${isCh ? 'Veto Penalty (Mins)' : 'Duration (Mins)'}</label>
+                    <input type="number" id="qc-mins" class="input" value="${s.game.defaultVetoMins ?? 15}" min="1" />
                   </div>
-                </div>`
-              : `<div class="field">
-                  <label>Casting Condition (Optional)</label>
-                  <input type="text" id="qc-cond" class="input" placeholder="e.g. Pay coin cost / Discard 1 card" value="Pay coin cost" />
-                </div>`
-          }
-          <button class="btn btn-primary btn-block" id="btn-qc-add">${icon('plus', 14)} Add ${isCh ? 'Challenge' : 'Curse'} to Wheel</button>
-        </div>
+                </div>
+                ${
+                  isCh
+                    ? `<div class="grid-2">
+                        <div class="field">
+                          <label>Category</label>
+                          <select id="qc-cat" class="select">${CHALLENGE_CATEGORIES.map((c) => `<option value="${c.id}">${c.label}</option>`).join('')}</select>
+                        </div>
+                        <div class="field">
+                          <label>Difficulty</label>
+                          <select id="qc-diff" class="select"><option>Easy</option><option selected>Medium</option><option>Hard</option></select>
+                        </div>
+                      </div>`
+                    : `<div class="field">
+                        <label>Casting Condition (Optional)</label>
+                        <input type="text" id="qc-cond" class="input" placeholder="e.g. Pay coin cost / Discard 1 card" value="Pay coin cost" />
+                      </div>`
+                }
+                <button class="btn btn-primary btn-block" id="btn-qc-add">${icon('plus', 14)} Add ${isCh ? 'Challenge' : 'Curse'} to Wheel</button>
+              </div>`
+            : `<div class="card"><div class="card-title">${icon('lock', 14)} Deck Locked by Game Master</div><div class="muted">Only the Game Master (or permitted Co-Host) can add, edit, or delete cards while this session is active.</div></div>`
+        }
 
         <div class="card">
           <div class="card-header">
             <div class="card-title">${isCh ? 'My Challenges' : 'Curses'} (${list.length})</div>
             <div class="row" style="gap:4px">
               <button class="btn btn-xs btn-secondary" id="btn-export-deck">Export</button>
-              <button class="btn btn-xs btn-secondary" id="btn-import-deck">Import</button>
-              ${list.length ? `<button class="btn btn-xs btn-danger" id="btn-clear-deck">Clear All</button>` : ''}
+              ${access.canEditDeck ? `<button class="btn btn-xs btn-secondary" id="btn-import-deck">Import</button>` : ''}
+              ${access.canEditDeck && list.length ? `<button class="btn btn-xs btn-danger" id="btn-clear-deck">Clear All</button>` : ''}
             </div>
           </div>
           ${
             list.length === 0
-              ? `<div class="muted" style="text-align:center;padding:8px 0">No ${isCh ? 'challenges' : 'curses'} yet. Use the form above to create your own.</div>`
+              ? `<div class="muted" style="text-align:center;padding:8px 0">No ${isCh ? 'challenges' : 'curses'} yet.</div>`
               : `<div style="display:flex;flex-direction:column;gap:4px">
                   ${list
                     .map(
                       (c) => `
                       <div class="toggle-row">
                         <label class="row" style="flex:1;cursor:pointer;min-width:0">
-                          <input type="checkbox" data-toggle-card="${this.deckKind}:${c.id}" ${c.active ? 'checked' : ''} />
+                          <input type="checkbox" data-toggle-card="${this.deckKind}:${c.id}" ${c.active ? 'checked' : ''} ${access.canEditDeck ? '' : 'disabled'} />
                           <div style="min-width:0">
                             <div style="font-size:12.5px;font-weight:700">${esc(c.title)} <span class="muted">(${isCh ? `${c.coins} coins` : `${c.cost} coins`})</span></div>
                             <div class="muted" style="font-size:11px">${esc(c.description.slice(0, 74))}${c.description.length > 74 ? '...' : ''}</div>
                           </div>
                         </label>
-                        <div class="row" style="gap:4px;flex-shrink:0">
-                          <button class="btn btn-xs btn-ghost" data-edit-card="${this.deckKind}:${c.id}" title="Edit">${icon('edit', 12)}</button>
-                          <button class="btn btn-xs btn-ghost" data-del-card="${this.deckKind}:${c.id}" title="Delete">${icon('trash', 12)}</button>
-                        </div>
+                        ${
+                          access.canEditDeck
+                            ? `<div class="row" style="gap:4px;flex-shrink:0">
+                                <button class="btn btn-xs btn-ghost" data-edit-card="${this.deckKind}:${c.id}" title="Edit">${icon('edit', 12)}</button>
+                                <button class="btn btn-xs btn-ghost" data-del-card="${this.deckKind}:${c.id}" title="Delete">${icon('trash', 12)}</button>
+                              </div>`
+                            : ''
+                        }
                       </div>`
                     )
                     .join('')}
@@ -2380,6 +2644,7 @@ class JetLagSydneyApp {
     const nearest = me?.lat != null ? this.mapCtrl.findNearestStation(me.lat, me.lng) : null;
     const players = Object.values(s.players || {});
 
+    const access = getAccess(s);
     const sr = s.scheduledRoom;
     const isLocked = Boolean(sr?.locked);
     const schedInviteUrl = (() => {
@@ -2430,35 +2695,35 @@ class JetLagSydneyApp {
               <div class="row">
                 <button class="btn btn-secondary btn-xs" id="btn-sched-copy" style="flex:1">${icon('copy', 12)} Copy Invite Link</button>
                 <button class="btn btn-secondary btn-xs" id="btn-sched-ics" style="flex:1">${icon('calendar', 12)} Add to Calendar</button>
-                <button class="btn btn-ghost btn-xs" id="btn-sched-unlock">${icon('unlock', 12)} Unlock</button>
+                ${access.canEditRules ? `<button class="btn btn-ghost btn-xs" id="btn-sched-unlock">${icon('unlock', 12)} Unlock</button>` : ''}
               </div>
             `
             : `
               <div class="muted" style="font-size:12px">Pick a kickoff time, mode, and Sydney meeting station, then lock it in to generate a countdown & shareable invite link.</div>
               <div class="field">
                 <label>Session Title</label>
-                <input type="text" id="sched-title" class="input" placeholder="e.g. Saturday Tag Across Sydney" value="${esc(sr?.title || 'Sydney Jet Lag Session')}" />
+                <input type="text" id="sched-title" class="input" placeholder="e.g. Saturday Tag Across Sydney" value="${esc(sr?.title || 'Sydney Jet Lag Session')}" ${access.canEditRules ? '' : 'disabled'} />
               </div>
               <div class="grid-2">
                 <div class="field">
                   <label>Game Mode</label>
-                  <select id="sched-mode" class="select">
+                  <select id="sched-mode" class="select" ${access.canEditRules ? '' : 'disabled'}>
                     ${Object.values(GAME_MODES).map((m) => `<option value="${m.id}" ${(sr?.mode || s.game.mode) === m.id ? 'selected' : ''}>${esc(m.shortName)}</option>`).join('')}
                   </select>
                 </div>
                 <div class="field">
                   <label>Room Code</label>
-                  <input type="text" id="sched-code" class="input mono" style="text-transform:uppercase" value="${esc(sr?.roomCode || s.room.code || generateRoomCode())}" />
+                  <input type="text" id="sched-code" class="input mono" style="text-transform:uppercase" value="${esc(sr?.roomCode || s.room.code || generateRoomCode())}" ${access.canEditRules ? '' : 'disabled'} />
                 </div>
               </div>
               <div class="grid-2">
                 <div class="field">
                   <label>Kickoff Date & Time</label>
-                  <input type="datetime-local" id="sched-time" class="input" value="${esc(sr?.startTimeIso || defaultScheduleDateTime())}" />
+                  <input type="datetime-local" id="sched-time" class="input" value="${esc(sr?.startTimeIso || defaultScheduleDateTime())}" ${access.canEditRules ? '' : 'disabled'} />
                 </div>
                 <div class="field">
                   <label>Meeting Station</label>
-                  <input type="text" id="sched-station" class="input" placeholder="Central" value="${esc(sr?.meetingStation || 'Central')}" />
+                  <input type="text" id="sched-station" class="input" placeholder="Central" value="${esc(sr?.meetingStation || 'Central')}" ${access.canEditRules ? '' : 'disabled'} />
                 </div>
               </div>
               <label class="toggle-row" style="padding:4px 0">
@@ -2466,11 +2731,11 @@ class JetLagSydneyApp {
                   <div style="font-size:12.5px;font-weight:700">Host as Non-Playing GM</div>
                   <div class="muted" style="font-size:11px">Run and spectate the event while your friends play</div>
                 </div>
-                <input type="checkbox" id="sched-host-gm" ${(sr ? sr.hostIsSpectator : me.isEventHost) ? 'checked' : ''} />
+                <input type="checkbox" id="sched-host-gm" ${(sr ? sr.hostIsSpectator : me.isEventHost) ? 'checked' : ''} ${access.canEditRules ? '' : 'disabled'} />
               </label>
               <div class="row">
-                <button class="btn btn-primary btn-sm" id="btn-sched-lock" style="flex:1">${icon('lock', 13)} Lock In Schedule</button>
-                ${sr ? `<button class="btn btn-ghost btn-sm" id="btn-sched-clear">Clear</button>` : ''}
+                <button class="btn btn-primary btn-sm" id="btn-sched-lock" style="flex:1" ${access.canEditRules ? '' : 'disabled'}>${icon('lock', 13)} Lock In Schedule</button>
+                ${sr && access.canEditRules ? `<button class="btn btn-ghost btn-sm" id="btn-sched-clear">Clear</button>` : ''}
               </div>
             `
         }
@@ -2479,16 +2744,19 @@ class JetLagSydneyApp {
       <div class="card ${me.isEventHost ? 'host-card' : ''}">
         <div class="card-header">
           <div class="card-title">Your Role & Live GPS</div>
-          ${me.isEventHost ? '<span class="host-pill">EVENT HOST (GM)</span>' : '<span class="tag-pill">PLAYING</span>'}
+          ${me.isEventHost ? '<span class="host-pill">GAME MASTER</span>' : access.isPermitted ? '<span class="tag-pill" style="border-color:#a855f7;color:#c084fc">PERMITTED CO-HOST</span>' : '<span class="tag-pill">PLAYER</span>'}
         </div>
         <div class="seg-bar" style="grid-template-columns:repeat(2,1fr)">
           <button class="seg-btn ${!me.isEventHost ? 'active' : ''}" id="btn-role-player">Playing</button>
-          <button class="seg-btn ${me.isEventHost ? 'active' : ''}" id="btn-role-host">Host Event (Not Playing)</button>
+          <button class="seg-btn ${me.isEventHost ? 'active' : ''}" id="btn-role-host" ${access.canClaimGm ? '' : 'disabled title="A Game Master is already active"'}>${access.canClaimGm || me.isEventHost ? 'Host Event (GM)' : 'GM Active'}</button>
         </div>
         <div class="grid-2">
           <div class="field">
-            <label>Your Name</label>
-            <input type="text" id="inp-player-name" class="input" value="${esc(me.name)}" />
+            <label>Your Name ${!access.canRenameSelf ? '(Locked)' : ''}</label>
+            <div class="row" style="gap:4px;flex-wrap:nowrap">
+              <input type="text" id="inp-player-name" class="input" value="${esc(me.name)}" ${access.canRenameSelf ? '' : 'disabled'} />
+              ${access.canRenameSelf && !me.isEventHost ? `<button class="btn btn-xs btn-secondary" id="btn-lock-my-name" title="Lock in your player name">${icon('lock', 12)}</button>` : ''}
+            </div>
           </div>
           ${
             me.isEventHost
@@ -2497,16 +2765,17 @@ class JetLagSydneyApp {
                   <input type="text" class="input" value="Spectator / GM" disabled />
                 </div>`
               : `<div class="field">
-                  <label>Your Team</label>
-                  <select id="sel-player-team" class="select">
+                  <label>Your Team ${!access.canEditTeams ? '(GM Assigned)' : ''}</label>
+                  <select id="sel-player-team" class="select" ${access.canEditTeams ? '' : 'disabled'}>
                     ${s.teams.map((t) => `<option value="${t.id}" ${me.teamId === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
                   </select>
                 </div>`
           }
         </div>
+        ${!access.canRenameSelf ? `<div class="muted" style="font-size:11px">Your name is locked to prevent mid-game changes. Ask the Game Master to unlock it if needed.</div>` : ''}
         ${
           me.isEventHost
-            ? `<div class="muted" style="font-size:12px">You are hosting this event without playing. You can watch every team's live GPS (including private Hide+Seek zones), broadcast announcements, assign players to teams, and spin or award challenges from the Game & Wheel tabs.</div>`
+            ? `<div class="muted" style="font-size:12px">You are hosting this event without playing. You can watch every team's live GPS (including private Hide+Seek zones), customize all game rules, grant Co-Host permissions, and broadcast announcements.</div>`
             : `
               <div class="row">
                 <button class="btn ${s.room.shareGps ? 'btn-danger' : 'btn-primary'} btn-sm" id="btn-toggle-gps" style="flex:1">
@@ -2518,19 +2787,24 @@ class JetLagSydneyApp {
               ${
                 nearest
                   ? `<div class="sp-badge" style="border-color:var(--accent-2);color:#2dd4bf">Nearest: <strong>${esc(nearest.station.name)}</strong> (${formatDistance(nearest.distanceM)}) · ${nearest.station.lines.join(', ')}</div>`
-                  : `<div class="muted" style="font-size:11.5px">Testing indoors? Place a Demo GPS pin:</div>`
+                  : `<div class="muted" style="font-size:11.5px">${access.mustVerifyGps ? `Strict GPS is ON — you must be within ${s.game.stationClaimRadiusM ?? 100}m of a station to claim it.` : 'Start Live GPS to track your distance to stations.'}</div>`
               }
-              <div class="row" style="gap:4px">
-                ${[
-                  ['Central', -33.88488, 151.20665],
-                  ['Circular Quay', -33.86133, 151.21046],
-                  ['Parramatta', -33.81744, 151.00493],
-                  ['Manly', -33.80045, 151.28371],
-                  ['Chatswood', -33.79749, 151.18111]
-                ]
-                  .map(([lbl, lat, lng]) => `<button class="btn btn-xs btn-ghost" data-demo-gps="${lat},${lng},${lbl}">${lbl}</button>`)
-                  .join('')}
-              </div>
+              ${
+                access.canUseDemoGps
+                  ? `<div class="muted" style="font-size:11px">Demo GPS Pins (Indoor Testing):</div>
+                     <div class="row" style="gap:4px">
+                       ${[
+                         ['Central', -33.88488, 151.20665],
+                         ['Circular Quay', -33.86133, 151.21046],
+                         ['Parramatta', -33.81744, 151.00493],
+                         ['Manly', -33.80045, 151.28371],
+                         ['Chatswood', -33.79749, 151.18111]
+                       ]
+                         .map(([lbl, lat, lng]) => `<button class="btn btn-xs btn-ghost" data-demo-gps="${lat},${lng},${lbl}">${lbl}</button>`)
+                         .join('')}
+                     </div>`
+                  : ''
+              }
             `
         }
       </div>
@@ -2578,26 +2852,39 @@ class JetLagSydneyApp {
       </div>
 
       <div class="card">
-        <div class="card-title">Participants (${players.length})</div>
+        <div class="card-title">Participants & Access (${players.length})</div>
         ${players
           .map((p) => {
             const t = s.teams.find((x) => x.id === p.teamId);
+            const lvl = p.isEventHost ? 'gm' : (p.accessLevel || 'player');
             return `
-              <div class="row-between" style="padding:6px 0;border-bottom:1px solid var(--border)">
-                <div class="row">
-                  <span style="width:10px;height:10px;border-radius:50%;background:${p.isEventHost ? '#a855f7' : (t?.color || '#94a3b8')}"></span>
-                  <strong style="font-size:13px">${esc(p.name)} ${p.id === s.localPlayerId ? '(You)' : ''}</strong>
-                  ${p.isEventHost ? '<span class="host-pill">HOST</span>' : ''}
+              <div style="padding:7px 0;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:5px">
+                <div class="row-between">
+                  <div class="row" style="gap:6px">
+                    <span style="width:10px;height:10px;border-radius:50%;background:${p.isEventHost ? '#a855f7' : (t?.color || '#94a3b8')}"></span>
+                    <strong style="font-size:13px">${esc(p.name)} ${p.id === s.localPlayerId ? '(You)' : ''}</strong>
+                    ${p.isEventHost ? '<span class="host-pill">GM</span>' : lvl === 'co_host' ? '<span class="tag-pill" style="border-color:#a855f7;color:#c084fc">PERMITTED</span>' : ''}
+                    ${p.nameLocked ? `<span class="muted" title="Name Locked">${icon('lock', 11)}</span>` : ''}
+                  </div>
+                  <span class="muted" style="font-size:11px">
+                    ${p.isEventHost ? 'Hosting' : `${esc(t?.name || '')} · ${p.gpsFrozen ? 'Frozen' : p.gpsHidden ? 'Hidden' : p.lat != null ? 'GPS Live' : 'No GPS'}`}
+                  </span>
                 </div>
                 ${
-                  me.isEventHost && p.id !== s.localPlayerId
-                    ? `<select class="select" data-gm-assign-player="${p.id}" style="width:auto;padding:3px 7px;font-size:11px">
-                        <option value="__host__" ${p.isEventHost ? 'selected' : ''}>Event Host (GM)</option>
-                        ${s.teams.map((tm) => `<option value="${tm.id}" ${!p.isEventHost && p.teamId === tm.id ? 'selected' : ''}>${esc(tm.name)}</option>`).join('')}
-                      </select>`
-                    : `<span class="muted" style="font-size:11px">
-                        ${p.isEventHost ? 'Spectating / Hosting' : `${esc(t?.name || '')} · ${p.gpsFrozen ? 'Frozen' : p.gpsHidden ? 'Hidden' : p.lat != null ? 'GPS Live' : 'No GPS'}`}
-                      </span>`
+                  access.isGm && p.id !== s.localPlayerId
+                    ? `<div class="row" style="gap:5px">
+                        <select class="select" data-gm-assign-player="${p.id}" style="flex:1;padding:4px 7px;font-size:11px">
+                          <option value="__host__" ${p.isEventHost ? 'selected' : ''}>Event Host (GM)</option>
+                          ${s.teams.map((tm) => `<option value="${tm.id}" ${!p.isEventHost && p.teamId === tm.id ? 'selected' : ''}>${esc(tm.name)}</option>`).join('')}
+                        </select>
+                        <select class="select" data-gm-access="${p.id}" style="width:118px;padding:4px 7px;font-size:11px">
+                          <option value="player" ${lvl === 'player' ? 'selected' : ''}>Player</option>
+                          <option value="co_host" ${lvl === 'co_host' ? 'selected' : ''}>Permitted</option>
+                          <option value="gm" ${lvl === 'gm' ? 'selected' : ''}>Game Master</option>
+                        </select>
+                        <button class="btn btn-xs btn-ghost" data-gm-unlock-name="${p.id}" title="${p.nameLocked ? 'Unlock or rename player' : 'Lock player name'}">${icon(p.nameLocked ? 'unlock' : 'lock', 12)}</button>
+                      </div>`
+                    : ''
                 }
               </div>`;
           })
@@ -2722,11 +3009,13 @@ class JetLagSydneyApp {
           if (!pl) return;
           if (val === '__host__') {
             pl.isEventHost = true;
+            pl.accessLevel = 'gm';
             pl.teamId = null;
             pl.reassignedAt = Date.now();
           } else {
             const tm = st.teams.find((x) => x.id === val);
             pl.isEventHost = false;
+            if (pl.accessLevel === 'gm') pl.accessLevel = 'player';
             pl.teamId = val;
             if (tm) pl.color = tm.color;
             pl.reassignedAt = Date.now();
@@ -2735,9 +3024,64 @@ class JetLagSydneyApp {
       });
     });
 
+    pane.querySelectorAll('[data-gm-access]').forEach((sel) => {
+      sel.addEventListener('change', () => {
+        const pid = sel.dataset.gmAccess;
+        const lvl = sel.value;
+        store.mutate((st) => {
+          const pl = st.players[pid];
+          if (!pl) return;
+          pl.accessLevel = lvl;
+          pl.isEventHost = lvl === 'gm';
+          if (lvl === 'gm') pl.teamId = null;
+          else if (!pl.teamId) pl.teamId = st.teams[0]?.id || 'team-a';
+          pl.reassignedAt = Date.now();
+        }, 'teams');
+        this.toast(`Updated access level to ${lvl.toUpperCase()}.`);
+      });
+    });
+
+    pane.querySelectorAll('[data-gm-unlock-name]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const pid = btn.dataset.gmUnlockName;
+        const pl = store.get().players[pid];
+        if (!pl) return;
+        store.mutate((st) => {
+          const target = st.players[pid];
+          if (!target) return;
+          target.nameLocked = !target.nameLocked;
+          target.reassignedAt = Date.now();
+        }, 'teams');
+        this.toast(pl.nameLocked ? `Unlocked ${pl.name}'s name.` : `Locked ${pl.name}'s name.`);
+      });
+    });
+
+    pane.querySelector('#btn-lock-my-name')?.addEventListener('click', () => {
+      const inp = pane.querySelector('#inp-player-name');
+      const v = inp?.value.trim();
+      if (!v) return this.toast('Enter your name first.');
+      store.mutate((st) => {
+        const p = st.players[st.localPlayerId];
+        p.name = v;
+        p.nameLocked = true;
+      }, 'profile');
+      this.toast(`Name locked as "${v}".`);
+    });
+
+    pane.querySelector('#inp-player-name').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') pane.querySelector('#btn-lock-my-name')?.click();
+    });
+
     pane.querySelector('#inp-player-name').addEventListener('change', (e) => {
+      if (!getAccess(store.get()).canRenameSelf) return;
       const v = e.target.value.trim() || 'Player';
-      store.mutate((st) => { st.players[st.localPlayerId].name = v; }, 'profile');
+      store.mutate((st) => {
+        const p = st.players[st.localPlayerId];
+        p.name = v;
+        if (st.permissions?.lockNamesAfterJoin && !p.isEventHost) {
+          p.nameLocked = true;
+        }
+      }, 'profile');
     });
 
     pane.querySelector('#sel-player-team')?.addEventListener('change', (e) => {
@@ -2788,6 +3132,11 @@ class JetLagSydneyApp {
     pane.querySelector('#btn-join-peer')?.addEventListener('click', () => {
       const code = normalizeRoomCode(pane.querySelector('#inp-join-code').value);
       if (!code) return this.toast('Enter a room code first (e.g. SYD-4K9P or 4K9P).');
+      // Lock player name upon joining a room so players can't spoof names mid-game
+      store.mutate((st) => {
+        const p = st.players[st.localPlayerId];
+        if (p && !p.isEventHost && st.permissions?.lockNamesAfterJoin) p.nameLocked = true;
+      }, 'profile', false);
       this.mp.joinPeerRoom(code);
     });
     pane.querySelector('#inp-join-code')?.addEventListener('keydown', (e) => {
