@@ -1,4 +1,4 @@
-const CACHE_NAME = 'jetlag-sydney-v2';
+const CACHE_NAME = 'jetlag-sydney-v3';
 const APP_SHELL = [
   './',
   './index.html',
@@ -7,6 +7,7 @@ const APP_SHELL = [
   './css/styles.css',
   './data/sydney-network.js',
   './data/challenges.js',
+  './js/icons.js',
   './js/state.js',
   './js/modes.js',
   './js/map.js',

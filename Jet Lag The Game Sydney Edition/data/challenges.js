@@ -528,35 +528,35 @@ export const POWERUPS_SHOP = [
     id: 'pw-double',
     title: 'Double Next Challenge',
     cost: 400,
-    icon: '2×',
+    icon: '2X',
     description: 'Doubles the coin/point reward of the next challenge you complete — but also doubles the veto penalty if you fail!'
   },
   {
     id: 'pw-freeze',
     title: 'Tracker Freeze (15 min)',
     cost: 1200,
-    icon: '❄️',
+    icon: 'FREEZE',
     description: 'Freezes your shared live GPS pin at your current coordinates for 15 minutes while you keep moving!'
   },
   {
     id: 'pw-veto-shield',
     title: 'Instant Veto Clear',
     cost: 700,
-    icon: '🛡️',
+    icon: 'CLEAR',
     description: 'Immediately cancels an active veto penalty countdown so you can draw a fresh challenge right away.'
   },
   {
     id: 'pw-radar-ping',
     title: 'Opponent Location Ping',
     cost: 1500,
-    icon: '📡',
+    icon: 'PING',
     description: 'Forces a one-time approximate 1 km accuracy ping of the opposing team (or reveals their current transit line).'
   },
   {
     id: 'pw-swap',
     title: 'Challenge Swap',
     cost: 350,
-    icon: '🔄',
+    icon: 'SWAP',
     description: 'Reroll the challenge wheel once without incurring a veto timeout.'
   }
 ];

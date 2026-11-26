@@ -458,7 +458,7 @@ export class SydneyMapController {
         <span>${st.lat.toFixed(4)}, ${st.lng.toFixed(4)}</span>
         ${dist != null ? `<span>• ${formatDistance(dist)} away</span>` : ''}
       </div>
-      ${claimTeam ? `<div class="sp-badge" style="border-color:${claimTeam.color};color:${claimTeam.color}">★ Claimed by ${claimTeam.name}</div>` : ''}
+      ${claimTeam ? `<div class="sp-badge" style="border-color:${claimTeam.color};color:${claimTeam.color}">Claimed by ${claimTeam.name}</div>` : ''}
       <div class="sp-actions"></div>
     `;
 
@@ -609,7 +609,7 @@ export class SydneyMapController {
           interactive: false,
           icon: L.divIcon({
             className: 'map-zone-label',
-            html: `<span style="border-color:${col};color:${col}">🏁 ${label}</span>`,
+            html: `<span style="border-color:${col};color:${col}">${label}</span>`,
             iconSize: [150, 26]
           })
         }).addTo(this.modeOverlayLayer);
@@ -621,17 +621,17 @@ export class SydneyMapController {
       for (const fl of state.flags) {
         const team = state.teams.find((t) => t.id === fl.teamId);
         const col = team?.color || '#F99D1C';
-        const statusIcon = fl.status === 'captured' ? '🏆' : fl.status === 'carried' ? '🏃' : '🚩';
+        const statusTag = fl.status === 'captured' ? 'CAPTURED' : fl.status === 'carried' ? 'CARRIED' : 'FLAG';
         const m = L.marker([fl.lat, fl.lng], {
           icon: L.divIcon({
             className: 'map-flag-icon',
-            html: `<div class="flag-pin" style="background:${col}">${statusIcon}<span>${fl.label}</span></div>`,
-            iconSize: [110, 30],
-            iconAnchor: [55, 15]
+            html: `<div class="flag-pin" style="background:${col}"><strong>${statusTag}</strong><span>${fl.label}</span></div>`,
+            iconSize: [120, 30],
+            iconAnchor: [60, 15]
           })
         });
         m.bindPopup(
-          `<div class="station-popup"><h4>${statusIcon} ${fl.label}</h4><p>Team: <strong>${team?.name || 'Neutral'}</strong><br/>Status: <strong>${fl.status.toUpperCase()}</strong></p></div>`,
+          `<div class="station-popup"><h4>${fl.label}</h4><p>Team: <strong>${team?.name || 'Neutral'}</strong><br/>Status: <strong>${fl.status.toUpperCase()}</strong></p></div>`,
           { className: 'jl-popup' }
         );
         m.addTo(this.modeOverlayLayer);
@@ -733,7 +733,7 @@ export class SydneyMapController {
           weight: 3
         })
           .bindTooltip(
-            `Thermometer (${formatDistance(haversineM(d.pA[0], d.pA[1], d.pB[0], d.pB[1]))}) — B is ${d.hotterIsB !== false ? 'HOTTER 🔥' : 'COLDER ❄️'}`,
+            `Thermometer (${formatDistance(haversineM(d.pA[0], d.pA[1], d.pB[0], d.pB[1]))}) — B is ${d.hotterIsB !== false ? 'HOTTER' : 'COLDER'}`,
             { className: 'jl-tooltip' }
           )
           .addTo(this.annotationsLayer);
@@ -768,7 +768,7 @@ export class SydneyMapController {
         L.marker([d.lat, d.lng], {
           icon: L.divIcon({
             className: 'map-custom-pin',
-            html: `<div class="custom-pin" style="background:${d.color || '#a855f7'}">📍<span>${d.label || 'Pin'}</span></div>`,
+            html: `<div class="custom-pin" style="background:${d.color || '#a855f7'}"><span>${d.label || 'Pin'}</span></div>`,
             iconSize: [110, 28],
             iconAnchor: [55, 14]
           })
@@ -830,7 +830,7 @@ export class SydneyMapController {
         html: `
           <div class="player-marker ${isMe ? 'is-me' : ''} ${p.gpsFrozen ? 'is-frozen' : ''}" style="--pcolor:${col}">
             <div class="pm-pulse"></div>
-            <div class="pm-dot">${p.gpsFrozen ? '❄️' : initials}</div>
+            <div class="pm-dot">${p.gpsFrozen ? 'FRZ' : initials}</div>
             <div class="pm-label">${p.name}${p.gpsFrozen ? ' (FROZEN)' : ''}</div>
           </div>
         `,
@@ -845,7 +845,7 @@ export class SydneyMapController {
             <h4>${p.name} ${isMe ? '(You)' : ''}</h4>
             <p>Team: <strong style="color:${col}">${team?.name || 'None'}</strong> ${roleTag ? `(${roleTag})` : ''}</p>
             ${sideText ? `<p>Zone: <strong>${sideText}</strong></p>` : ''}
-            <p class="sp-meta">Updated ${ageSec < 5 ? 'just now' : `${ageSec}s ago`}${p.gpsFrozen ? ' • ❄️ Tracker Frozen' : ''}</p>
+            <p class="sp-meta">Updated ${ageSec < 5 ? 'just now' : `${ageSec}s ago`}${p.gpsFrozen ? ' · Tracker Frozen' : ''}</p>
           </div>`,
           { className: 'jl-popup' }
         )
@@ -1006,7 +1006,7 @@ export class SydneyMapController {
     }, 'annotation');
     store.addFeed({
       type: 'map',
-      text: `plotted a ${formatDistance(dist)} Thermometer bisector (${hotterIsB ? 'HOTTER 🔥' : 'COLDER ❄️'}).`
+      text: `plotted a ${formatDistance(dist)} Thermometer bisector (${hotterIsB ? 'HOTTER' : 'COLDER'}).`
     });
   }
 

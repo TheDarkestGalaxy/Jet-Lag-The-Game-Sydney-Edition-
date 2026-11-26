@@ -31,7 +31,7 @@
       <div class="brand-logo">JL</div>
       <div>
         <div class="brand-title">Jet Lag: Sydney</div>
-        <div class="brand-sub" id="network-meta-sub">390+ Real Stops • 29 Lines</div>
+        <div class="brand-sub" id="network-meta-sub">394 Real Stops · 29 Lines</div>
       </div>
     </div>
 
@@ -41,7 +41,7 @@
         <span id="topbar-mode-label">Hide + Seek</span>
       </button>
       <button class="clock-pill" id="topbar-clock-btn" title="Click to Start / Pause Game Clock">
-        <span id="topbar-clock-ico">⏱️</span>
+        <span id="topbar-clock-ico" class="ico-wrap"></span>
         <span id="topbar-clock-text">00:00</span>
       </button>
     </div>
@@ -51,8 +51,8 @@
         <span class="status-led"></span>
         <span id="topbar-room-label">Solo</span>
       </button>
-      <button class="btn btn-ghost btn-xs" id="btn-sound-toggle" title="Toggle Wheel Sound">🔊</button>
-      <button class="btn btn-ghost btn-xs" id="btn-theme-toggle" title="Toggle Outdoor Light / Dark Mode">☀️</button>
+      <button class="btn btn-ghost btn-xs icon-only" id="btn-sound-toggle" title="Toggle Wheel Sound"></button>
+      <button class="btn btn-ghost btn-xs icon-only" id="btn-theme-toggle" title="Toggle Outdoor Light / Dark Mode"></button>
     </div>
   </header>
 
@@ -65,9 +65,9 @@
       <!-- Floating Station Search -->
       <div class="map-search-bar">
         <div class="search-input-wrap">
-          <span>🔍</span>
-          <input type="text" id="station-search-input" placeholder="Search 380+ stations, wharves, lines…" autocomplete="off" />
-          <button class="btn btn-ghost btn-xs" id="station-search-clear" style="display:none">✕</button>
+          <svg class="icon" width="15" height="15" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input type="text" id="station-search-input" placeholder="Search 394 stations, wharves, lines..." autocomplete="off" />
+          <button class="btn btn-ghost btn-xs" id="station-search-clear" style="display:none" aria-label="Clear search">Clear</button>
         </div>
         <div class="search-results" id="station-search-results"></div>
       </div>
@@ -75,21 +75,44 @@
       <!-- Floating Map Strategy Tools & Basemap Switcher -->
       <div class="map-tools-bar">
         <div class="tool-strip" role="toolbar" aria-label="Map Strategy Tools">
-          <button class="tool-btn active" data-map-tool="select" title="Inspect stations & routes">👆</button>
-          <button class="tool-btn" data-map-tool="radar" title="Draw Radar Hit/Miss Circle">📡 Radar</button>
-          <button class="tool-btn" data-map-tool="thermometer" title="Draw Thermometer Perpendicular Bisector">🌡️ Thermo</button>
-          <button class="tool-btn" data-map-tool="ruler" title="Measure real-world distance & walk/transit ETA">📏</button>
-          <button class="tool-btn" data-map-tool="polygon" title="Shade custom eliminated polygon zone">🗺️</button>
-          <button class="tool-btn" data-map-tool="pin" title="Drop custom tactical pin">📍</button>
-          <button class="tool-btn" id="btn-undo-ann" title="Undo last map overlay">↩️</button>
-          <button class="tool-btn" id="btn-clear-ann" title="Clear all strategy overlays">🗑️</button>
+          <button class="tool-btn active" data-map-tool="select" title="Inspect stations & routes">
+            <svg class="icon" width="14" height="14" viewBox="0 0 24 24"><path d="M5 3l14 9-6 1.5L10 20 5 3z"/></svg>
+          </button>
+          <button class="tool-btn" data-map-tool="radar" title="Draw Radar Hit/Miss Circle">
+            <svg class="icon" width="14" height="14" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><path d="M12 12l6.4-6.4"/></svg>
+            <span>Radar</span>
+          </button>
+          <button class="tool-btn" data-map-tool="thermometer" title="Draw Thermometer Perpendicular Bisector">
+            <svg class="icon" width="14" height="14" viewBox="0 0 24 24"><path d="M14 14.76V5a2 2 0 0 0-4 0v9.76a4 4 0 1 0 4 0z"/></svg>
+            <span>Thermo</span>
+          </button>
+          <button class="tool-btn" data-map-tool="ruler" title="Measure distance & ETA">
+            <svg class="icon" width="14" height="14" viewBox="0 0 24 24"><path d="M21.3 8.7 15.3 2.7a1 1 0 0 0-1.4 0L2.7 13.9a1 1 0 0 0 0 1.4l6 6a1 1 0 0 0 1.4 0L21.3 10.1a1 1 0 0 0 0-1.4z"/></svg>
+          </button>
+          <button class="tool-btn" data-map-tool="polygon" title="Shade eliminated polygon zone">
+            <svg class="icon" width="14" height="14" viewBox="0 0 24 24"><polygon points="12 3 21 8.5 18 19.5 6 19.5 3 8.5 12 3"/></svg>
+          </button>
+          <button class="tool-btn" data-map-tool="pin" title="Drop tactical pin">
+            <svg class="icon" width="14" height="14" viewBox="0 0 24 24"><path d="M12 21s-6-5.7-6-11a6 6 0 1 1 12 0c0 5.3-6 11-6 11z"/><circle cx="12" cy="10" r="2.2"/></svg>
+          </button>
+          <button class="tool-btn" id="btn-undo-ann" title="Undo last map overlay">
+            <svg class="icon" width="14" height="14" viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
+          </button>
+          <button class="tool-btn" id="btn-clear-ann" title="Clear all strategy overlays">
+            <svg class="icon" width="14" height="14" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+          </button>
         </div>
 
         <div class="tool-strip">
-          <button class="tool-btn" id="btn-locate-me" title="Center on My GPS">🎯 GPS</button>
-          <button class="tool-btn" id="btn-fit-sydney" title="Fit Greater Sydney">🏙️ SYD</button>
-          <button class="tool-btn" id="btn-fit-nsw" title="Fit Full Intercity NSW Network">🗺️ NSW</button>
-          <button class="tool-btn" id="btn-toggle-labels" title="Toggle Permanent Station Labels">🏷️</button>
+          <button class="tool-btn" id="btn-locate-me" title="Center on My GPS">
+            <svg class="icon" width="14" height="14" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/></svg>
+            <span>GPS</span>
+          </button>
+          <button class="tool-btn" id="btn-fit-sydney" title="Fit Greater Sydney">SYD</button>
+          <button class="tool-btn" id="btn-fit-nsw" title="Fit Full Intercity NSW Network">NSW</button>
+          <button class="tool-btn" id="btn-toggle-labels" title="Toggle Permanent Station Labels">
+            <svg class="icon" width="14" height="14" viewBox="0 0 24 24"><path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L2 12V2h10l8.6 8.6a2 2 0 0 1 0 2.8z"/><circle cx="7" cy="7" r="1.5" fill="currentColor"/></svg>
+          </button>
           <select id="basemap-select" class="select" style="width:auto;padding:4px 7px;font-size:11.5px;border:none;background:transparent" title="Change Base Map">
             <option value="dark">Dark Street</option>
             <option value="minimal_dark">Minimal Dark</option>
@@ -102,7 +125,7 @@
 
       <!-- Active Drawing Tool Banner -->
       <div class="tool-banner" id="map-tool-banner">
-        <span id="map-tool-hint">Tap the map…</span>
+        <span id="map-tool-hint">Tap the map...</span>
         <button class="btn btn-primary btn-xs" id="btn-tool-gps" style="display:none">At My GPS</button>
         <button class="btn btn-accent btn-xs" id="btn-tool-finish" style="display:none">Finish</button>
         <button class="btn btn-ghost btn-xs" id="btn-tool-cancel">Cancel</button>
@@ -122,15 +145,30 @@
     <aside class="side-panel" id="side-panel">
       <div class="mobile-drawer-handle">
         <strong id="mobile-drawer-title" style="font-family:var(--font-display)">Game Control</strong>
-        <button class="btn btn-ghost btn-xs" id="btn-close-mobile-drawer">▼ Map</button>
+        <button class="btn btn-ghost btn-xs" id="btn-close-mobile-drawer">Map</button>
       </div>
 
       <nav class="panel-tabs" role="tablist">
-        <button class="tab-btn active" data-tab="game"><span class="tab-ico">🎮</span>Game</button>
-        <button class="tab-btn" data-tab="wheel"><span class="tab-ico">🎡</span>Wheel</button>
-        <button class="tab-btn" data-tab="shop"><span class="tab-ico">🪙</span>Shop</button>
-        <button class="tab-btn" data-tab="feed"><span class="tab-ico">💬</span>Feed</button>
-        <button class="tab-btn" data-tab="live"><span class="tab-ico">📡</span>Live</button>
+        <button class="tab-btn active" data-tab="game">
+          <svg class="icon" width="16" height="16" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="4"/><line x1="6" y1="12" x2="10" y2="12"/><line x1="8" y1="10" x2="8" y2="14"/><circle cx="15.5" cy="11" r="1" fill="currentColor"/><circle cx="18" cy="13" r="1" fill="currentColor"/></svg>
+          <span>Game</span>
+        </button>
+        <button class="tab-btn" data-tab="wheel">
+          <svg class="icon" width="16" height="16" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/><path d="M12 3v6.5M12 14.5V21M3 12h6.5M14.5 12H21"/></svg>
+          <span>Wheel</span>
+        </button>
+        <button class="tab-btn" data-tab="shop">
+          <svg class="icon" width="16" height="16" viewBox="0 0 24 24"><path d="M6 7h12l1 13H5L6 7z"/><path d="M9 7V5a3 3 0 0 1 6 0v2"/></svg>
+          <span>Shop</span>
+        </button>
+        <button class="tab-btn" data-tab="feed">
+          <svg class="icon" width="16" height="16" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          <span>Feed</span>
+        </button>
+        <button class="tab-btn" data-tab="live">
+          <svg class="icon" width="16" height="16" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2" fill="currentColor"/><path d="M16.2 7.8a6 6 0 0 1 0 8.4M7.8 16.2a6 6 0 0 1 0-8.4M19.1 4.9a10 10 0 0 1 0 14.2M4.9 19.1a10 10 0 0 1 0-14.2"/></svg>
+          <span>Live</span>
+        </button>
       </nav>
 
       <div class="panel-body">
@@ -141,7 +179,7 @@
         <div class="tab-pane" id="pane-wheel">
           <div class="card">
             <div class="card-header">
-              <div class="card-title">🎡 Randomizer Wheel</div>
+              <div class="card-title">Randomizer Wheel</div>
               <div class="row">
                 <button class="btn btn-xs btn-primary" id="wheel-type-challenges">Challenges</button>
                 <button class="btn btn-xs btn-ghost" id="wheel-type-curses">Curses</button>
@@ -153,8 +191,8 @@
                 <canvas id="challenge-wheel-canvas" width="340" height="340"></canvas>
               </div>
               <div class="row" style="width:100%">
-                <button class="btn btn-primary" id="btn-spin-wheel" style="flex:1">🎲 SPIN THE WHEEL</button>
-                <button class="btn btn-secondary" id="btn-shuffle-wheel" title="Load a fresh random sample of active cards onto the wheel">🔀 Shuffle</button>
+                <button class="btn btn-primary" id="btn-spin-wheel" style="flex:1">Spin the Wheel</button>
+                <button class="btn btn-secondary" id="btn-shuffle-wheel" title="Load a fresh random sample of active cards onto the wheel">Shuffle</button>
               </div>
             </div>
           </div>
@@ -179,12 +217,30 @@
 
   <!-- MOBILE BOTTOM NAVIGATION -->
   <nav class="mobile-nav" aria-label="Mobile Navigation">
-    <button class="active" data-mobile-tab="map"><span class="ico">🗺️</span>Map</button>
-    <button data-mobile-tab="game"><span class="ico">🎮</span>Game</button>
-    <button data-mobile-tab="wheel"><span class="ico">🎡</span>Wheel</button>
-    <button data-mobile-tab="shop"><span class="ico">🪙</span>Shop</button>
-    <button data-mobile-tab="feed"><span class="ico">💬</span>Feed</button>
-    <button data-mobile-tab="live"><span class="ico">📡</span>Live</button>
+    <button class="active" data-mobile-tab="map">
+      <svg class="icon" width="17" height="17" viewBox="0 0 24 24"><polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21 3 6"/><line x1="9" y1="3" x2="9" y2="18"/><line x1="15" y1="6" x2="15" y2="21"/></svg>
+      <span>Map</span>
+    </button>
+    <button data-mobile-tab="game">
+      <svg class="icon" width="17" height="17" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="4"/><line x1="6" y1="12" x2="10" y2="12"/><line x1="8" y1="10" x2="8" y2="14"/></svg>
+      <span>Game</span>
+    </button>
+    <button data-mobile-tab="wheel">
+      <svg class="icon" width="17" height="17" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg>
+      <span>Wheel</span>
+    </button>
+    <button data-mobile-tab="shop">
+      <svg class="icon" width="17" height="17" viewBox="0 0 24 24"><path d="M6 7h12l1 13H5L6 7z"/><path d="M9 7V5a3 3 0 0 1 6 0v2"/></svg>
+      <span>Shop</span>
+    </button>
+    <button data-mobile-tab="feed">
+      <svg class="icon" width="17" height="17" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      <span>Feed</span>
+    </button>
+    <button data-mobile-tab="live">
+      <svg class="icon" width="17" height="17" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2" fill="currentColor"/><path d="M16.2 7.8a6 6 0 0 1 0 8.4M7.8 16.2a6 6 0 0 1 0-8.4"/></svg>
+      <span>Live</span>
+    </button>
   </nav>
 
   <!-- REUSABLE MODAL DIALOG -->

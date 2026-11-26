@@ -16,6 +16,7 @@ import {
 import { SydneyMapController } from './map.js';
 import { ChallengeWheel } from './wheel.js';
 import { MultiplayerManager, generateRoomCode, compressImageFile } from './multiplayer.js';
+import { icon } from './icons.js';
 
 function esc(str) {
   return String(str ?? '')
@@ -55,7 +56,7 @@ class JetLagSydneyApp {
     // Update network badge
     const metaEl = document.getElementById('network-meta-sub');
     if (metaEl) {
-      metaEl.textContent = `${SYDNEY_NETWORK.stations.length} Real Stops • ${SYDNEY_NETWORK.lines.length} Lines`;
+      metaEl.textContent = `${SYDNEY_NETWORK.stations.length} Real Stops · ${SYDNEY_NETWORK.lines.length} Lines`;
     }
 
     // Init Multiplayer Manager
@@ -94,7 +95,7 @@ class JetLagSydneyApp {
       onLand: (item) => {
         this.landedCard = { ...item, wheelMode: this.wheelMode };
         this.renderWheelLanded();
-        this.toast(`Landed on: ${item.title}!`);
+        this.toast(`Landed on: ${item.title}`);
       }
     });
 
@@ -262,7 +263,7 @@ class JetLagSydneyApp {
     });
     document.getElementById('btn-tool-gps').addEventListener('click', () => {
       const p = store.getLocalPlayer();
-      if (p?.lat == null) return this.toast('Enable GPS (or place a Demo Pin in Live tab) first!');
+      if (p?.lat == null) return this.toast('Enable GPS (or place a Demo Pin in the Live tab) first.');
       this.openRadarModal(p.lat, p.lng, 'My GPS');
     });
 
@@ -273,7 +274,7 @@ class JetLagSydneyApp {
         this.mapCtrl.flyToCoord(p.lat, p.lng, 15);
       } else {
         this.mp.startGps();
-        this.toast('Requesting live GPS location…');
+        this.toast('Requesting live GPS location...');
       }
     });
     document.getElementById('btn-fit-sydney').addEventListener('click', () => this.mapCtrl.fitGreaterSydney());
@@ -308,7 +309,7 @@ class JetLagSydneyApp {
     document.getElementById('challenge-wheel-canvas').addEventListener('click', () => this.wheel.spin());
     document.getElementById('btn-shuffle-wheel').addEventListener('click', () => {
       this.refreshWheelPool();
-      this.toast('Shuffled wheel slices from active deck!');
+      this.toast('Shuffled wheel slices from active deck.');
     });
 
     // Modal backdrop close
@@ -320,7 +321,7 @@ class JetLagSydneyApp {
   applyTheme(theme) {
     document.body.classList.toggle('theme-light', theme === 'light');
     const btn = document.getElementById('btn-theme-toggle');
-    if (btn) btn.textContent = theme === 'light' ? '🌙' : '☀️';
+    if (btn) btn.innerHTML = icon(theme === 'light' ? 'moon' : 'sun', 15);
   }
 
   openTabOnMobileOrDesktop(tabName) {
@@ -398,7 +399,7 @@ class JetLagSydneyApp {
       ? state.room.code
       : 'Solo';
 
-    document.getElementById('btn-sound-toggle').textContent = state.soundEnabled ? '🔊' : '🔇';
+    document.getElementById('btn-sound-toggle').innerHTML = icon(state.soundEnabled ? 'volumeOn' : 'volumeOff', 15);
     this.tickTimers();
   }
 
@@ -409,7 +410,6 @@ class JetLagSydneyApp {
     const clockIco = document.getElementById('topbar-clock-ico');
     const clockText = document.getElementById('topbar-clock-text');
 
-    // Priority display: Active Veto countdown > Hiding countdown > Main Game Clock
     const now = Date.now();
     const vetoRem = (myTeam?.vetoEndsAt || 0) - now;
     const hidingRem = (s.game.hidingEndsAt || 0) - now;
@@ -417,11 +417,11 @@ class JetLagSydneyApp {
     clockBtn.classList.remove('running', 'veto');
     if (vetoRem > 0) {
       clockBtn.classList.add('veto');
-      clockIco.textContent = '🚫';
+      clockIco.innerHTML = icon('ban', 13);
       clockText.textContent = `VETO ${formatClock(vetoRem)}`;
     } else if (s.game.status === 'running' && hidingRem > 0 && s.game.rules.hideSeekQA) {
       clockBtn.classList.add('running');
-      clockIco.textContent = '🙈';
+      clockIco.innerHTML = icon('eyeOff', 13);
       clockText.textContent = `HIDE ${formatClock(hidingRem)}`;
     } else {
       let elapsed = s.game.elapsedBeforePauseMs || 0;
@@ -429,11 +429,10 @@ class JetLagSydneyApp {
         elapsed += now - s.game.startedAt;
         clockBtn.classList.add('running');
       }
-      clockIco.textContent = s.game.status === 'running' ? '▶️' : s.game.status === 'paused' ? '⏸️' : '⏱️';
+      clockIco.innerHTML = icon(s.game.status === 'running' ? 'play' : s.game.status === 'paused' ? 'pause' : 'clock', 13);
       clockText.textContent = formatClock(elapsed);
     }
 
-    // Update inline dynamic countdown spans (curses, transit burn, tracker freeze)
     document.querySelectorAll('[data-countdown-until]').forEach((el) => {
       const until = Number(el.dataset.countdownUntil);
       const rem = until - now;
@@ -443,7 +442,7 @@ class JetLagSydneyApp {
       const since = Number(el.dataset.burnSince);
       const rate = Number(el.dataset.burnRate);
       const mins = Math.max(0, (now - since) / 60000);
-      el.textContent = `${formatClock(now - since)} • ~${Math.round(mins * rate)} coins`;
+      el.textContent = `${formatClock(now - since)} · ~${Math.round(mins * rate)} coins`;
     });
   }
 
@@ -463,7 +462,7 @@ class JetLagSydneyApp {
       }
     }, 'clock');
     const status = store.get().game.status;
-    store.addFeed({ type: 'system', text: status === 'running' ? 'Game clock STARTED!' : 'Game clock PAUSED.' });
+    store.addFeed({ type: 'system', text: status === 'running' ? 'Game clock started.' : 'Game clock paused.' });
   }
 
   // ===== TAB 1: GAME PANE =====
@@ -476,12 +475,11 @@ class JetLagSydneyApp {
     const myPlayer = store.getLocalPlayer();
 
     let html = `
-      <!-- Mode Selector Card -->
       <div class="card">
         <div class="card-header">
-          <div class="card-title">🎯 Game Mode</div>
+          <div class="card-title">Game Mode</div>
           <div class="row">
-            <button class="btn btn-xs btn-secondary" id="btn-toggle-rules">${this.showRulesConfig ? 'Hide Rules' : '⚙️ Customize Rules'}</button>
+            <button class="btn btn-xs btn-secondary" id="btn-toggle-rules">${icon('sliders', 12)} ${this.showRulesConfig ? 'Hide Rules' : 'Rules'}</button>
             <button class="btn btn-xs btn-danger" id="btn-reset-game">Reset</button>
           </div>
         </div>
@@ -494,7 +492,7 @@ class JetLagSydneyApp {
                   <span class="mode-tile-name">${esc(m.shortName)}</span>
                   <span class="mode-badge">${m.badge}</span>
                 </div>
-                <div class="mode-tile-desc">${esc(m.tagline.slice(0, 74))}…</div>
+                <div class="mode-tile-desc">${esc(m.tagline.slice(0, 74))}...</div>
               </button>`
             )
             .join('')}
@@ -502,24 +500,24 @@ class JetLagSydneyApp {
         <div class="muted" style="font-size:12px"><strong>${esc(mode.name)}:</strong> ${esc(mode.tagline)}</div>
         <div class="row">
           <button class="btn btn-primary btn-sm" id="btn-game-start-pause" style="flex:1">
-            ${s.game.status === 'running' ? '⏸️ Pause Clock' : s.game.status === 'paused' ? '▶️ Resume Clock' : '▶️ Start Game Clock'}
+            ${icon(s.game.status === 'running' ? 'pause' : 'play', 13)}
+            ${s.game.status === 'running' ? 'Pause Clock' : s.game.status === 'paused' ? 'Resume Clock' : 'Start Game Clock'}
           </button>
           ${
             s.game.rules.hideSeekQA
-              ? `<button class="btn btn-accent btn-sm" id="btn-start-hiding-timer">🙈 ${s.game.hidingMins}m Hide Timer</button>`
+              ? `<button class="btn btn-accent btn-sm" id="btn-start-hiding-timer">${s.game.hidingMins}m Hide Timer</button>`
               : ''
           }
         </div>
       </div>
     `;
 
-    // Flexible Modular Rules Configurator
     if (this.showRulesConfig || s.game.mode === 'custom') {
       html += `
         <div class="card">
           <div class="card-header">
-            <div class="card-title">🧩 Flexible Rule Modules</div>
-            <span class="muted">Mix & match any house rules</span>
+            <div class="card-title">Modular Rules</div>
+            <span class="muted">Customise for house games</span>
           </div>
           <div>
             ${RULE_MODULES.map(
@@ -541,11 +539,10 @@ class JetLagSydneyApp {
       ? computeRailRushStats(SYDNEY_NETWORK, s.claimedStations, s.teams, s.game.railRushLineBonus)
       : null;
 
-    // Scoreboard & Teams
     html += `
       <div class="card">
         <div class="card-header">
-          <div class="card-title">🏆 Teams & Roles</div>
+          <div class="card-title">Teams & Roles</div>
           <button class="btn btn-xs btn-secondary" id="btn-add-team">+ Add Team</button>
         </div>
         ${s.teams
@@ -568,21 +565,21 @@ class JetLagSydneyApp {
                         .join('')}
                     </select>
                     ${!isMine ? `<button class="btn btn-xs btn-ghost" data-join-team="${t.id}">Join</button>` : ''}
-                    <button class="btn btn-xs btn-ghost" data-edit-team="${t.id}" title="Rename / Color">✏️</button>
+                    <button class="btn btn-xs btn-ghost" data-edit-team="${t.id}" title="Rename team">${icon('edit', 12)}</button>
                   </div>
                 </div>
                 <div class="team-stat-row">
-                  ${s.game.rules.economy ? `<span class="stat-pill">🪙 ${t.coins}</span>` : ''}
-                  <span class="stat-pill">⭐ ${t.points + (rrScore?.totalScore || 0)} pts</span>
-                  ${rrScore ? `<span class="stat-pill">🚄 ${rrScore.stations} stops</span>` : ''}
+                  ${s.game.rules.economy ? `<span class="stat-pill">${t.coins} coins</span>` : ''}
+                  <span class="stat-pill">${t.points + (rrScore?.totalScore || 0)} pts</span>
+                  ${rrScore ? `<span class="stat-pill">${rrScore.stations} stops</span>` : ''}
                   <span class="muted" style="font-size:11.5px">${members.length ? members.map((m) => esc(m.name)).join(', ') : 'No players'}</span>
                 </div>
-                ${vetoRem > 0 ? `<div class="sp-badge" style="border-color:#ef4444;color:#f87171">🚫 Veto Cooldown: <span data-countdown-until="${t.vetoEndsAt}">${formatClock(vetoRem)}</span></div>` : ''}
-                ${t.doubleNext ? `<div class="sp-badge" style="border-color:#F99D1C;color:#F99D1C">⚡ 2× Double Next Challenge Active!</div>` : ''}
+                ${vetoRem > 0 ? `<div class="sp-badge" style="border-color:#ef4444;color:#f87171">Veto Cooldown: <span data-countdown-until="${t.vetoEndsAt}">${formatClock(vetoRem)}</span></div>` : ''}
+                ${t.doubleNext ? `<div class="sp-badge" style="border-color:#F99D1C;color:#F99D1C">2X Double Next Challenge Active</div>` : ''}
                 <div class="row">
                   <button class="btn btn-xs btn-ghost" data-pts-delta="${t.id}:1">+1 pt</button>
                   <button class="btn btn-xs btn-ghost" data-pts-delta="${t.id}:-1">-1 pt</button>
-                  ${s.game.rules.economy ? `<button class="btn btn-xs btn-ghost" data-coins-delta="${t.id}:250">+250 🪙</button><button class="btn btn-xs btn-ghost" data-coins-delta="${t.id}:-250">-250 🪙</button>` : ''}
+                  ${s.game.rules.economy ? `<button class="btn btn-xs btn-ghost" data-coins-delta="${t.id}:250">+250 coins</button><button class="btn btn-xs btn-ghost" data-coins-delta="${t.id}:-250">-250 coins</button>` : ''}
                 </div>
               </div>
             `;
@@ -601,19 +598,19 @@ class JetLagSydneyApp {
       html += `
         <div class="card">
           <div class="card-header">
-            <div class="card-title">🙈 Hide + Seek HQ</div>
+            <div class="card-title">Hide + Seek HQ</div>
             <select id="hs-radius-select" class="select" style="width:auto;padding:4px 7px;font-size:11.5px">
               ${[500, 800, 1000, 1500, 2000].map((r) => `<option value="${r}" ${s.game.hidingRadiusM === r ? 'selected' : ''}>Zone: ${r}m</option>`).join('')}
             </select>
           </div>
           <div class="row">
-            <button class="btn btn-accent btn-sm" id="btn-hs-set-nearest" style="flex:1">📍 Set Hiding Zone at Nearest Stop</button>
-            ${hz ? `<button class="btn btn-secondary btn-sm" id="btn-hs-reveal">${hz.revealed ? 'Hide Zone' : '👁️ Reveal Zone'}</button>` : ''}
+            <button class="btn btn-accent btn-sm" id="btn-hs-set-nearest" style="flex:1">${icon('pin', 13)} Set Hiding Zone at Nearest Stop</button>
+            ${hz ? `<button class="btn btn-secondary btn-sm" id="btn-hs-reveal">${hz.revealed ? 'Hide Zone' : 'Reveal Zone'}</button>` : ''}
           </div>
-          ${canSeeHz ? `<div class="sp-badge" style="border-color:#168388;color:#2dd4bf">Hiding Zone: ${esc(hz.stationName)} (${hz.radiusM}m) ${hz.revealed ? '— REVEALED TO ALL' : '— Hidden from Seekers'}</div>` : `<div class="muted">Tap any station on the map → "Set Hiding Zone Here" (kept hidden from Seekers!).</div>`}
+          ${canSeeHz ? `<div class="sp-badge" style="border-color:#168388;color:#2dd4bf">Hiding Zone: ${esc(hz.stationName)} (${hz.radiusM}m) ${hz.revealed ? '— REVEALED TO ALL' : '— Hidden from Seekers'}</div>` : `<div class="muted">Tap any station on the map and choose "Set Hiding Zone Here" (kept hidden from Seekers).</div>`}
 
           <div style="border-top:1px solid var(--border);padding-top:9px;display:flex;flex-direction:column;gap:8px">
-            <div class="card-title" style="font-size:13px">❓ Seeker Question Deck</div>
+            <div class="card-title" style="font-size:13px">Seeker Question Deck</div>
             <div class="row" style="gap:4px">
               ${cats.map((c) => `<button class="btn btn-xs ${this.qaCategoryFilter === c ? 'btn-primary' : 'btn-ghost'}" data-qa-cat="${c}">${c}</button>`).join('')}
             </div>
@@ -629,8 +626,8 @@ class JetLagSydneyApp {
                     <div class="muted" style="font-size:11.5px">${esc(q.prompt)}</div>
                     <div class="row">
                       <button class="btn btn-xs btn-primary" data-ask-q="${q.id}">Ask Hider</button>
-                      ${q.mapAction === 'radar' ? `<button class="btn btn-xs btn-secondary" data-q-radar="${q.radiusKm}">📡 Draw ${q.radiusKm}km Radar</button>` : ''}
-                      ${q.mapAction === 'thermometer' ? `<button class="btn btn-xs btn-secondary" data-q-thermo="1">🌡️ Plot Bisector</button>` : ''}
+                      ${q.mapAction === 'radar' ? `<button class="btn btn-xs btn-secondary" data-q-radar="${q.radiusKm}">${icon('radar', 12)} Draw ${q.radiusKm}km Radar</button>` : ''}
+                      ${q.mapAction === 'thermometer' ? `<button class="btn btn-xs btn-secondary" data-q-thermo="1">${icon('thermometer', 12)} Plot Bisector</button>` : ''}
                     </div>
                   </div>`
                 )
@@ -642,7 +639,7 @@ class JetLagSydneyApp {
             s.qaLog.length
               ? `
             <div style="border-top:1px solid var(--border);padding-top:9px;display:flex;flex-direction:column;gap:6px">
-              <div class="card-title" style="font-size:13px">📋 Asked Questions (${s.qaLog.length})</div>
+              <div class="card-title" style="font-size:13px">Asked Questions (${s.qaLog.length})</div>
               ${s.qaLog
                 .slice()
                 .reverse()
@@ -661,9 +658,9 @@ class JetLagSydneyApp {
                         : `<div class="row">
                             <button class="btn btn-xs btn-primary" data-ans-qa="${qa.id}:YES (HIT)">YES / HIT</button>
                             <button class="btn btn-xs btn-danger" data-ans-qa="${qa.id}:NO (MISS)">NO / MISS</button>
-                            <button class="btn btn-xs btn-secondary" data-ans-qa="${qa.id}:HOTTER 🔥">HOTTER</button>
-                            <button class="btn btn-xs btn-secondary" data-ans-qa="${qa.id}:COLDER ❄️">COLDER</button>
-                            <button class="btn btn-xs btn-ghost" data-ans-custom="${qa.id}">Custom…</button>
+                            <button class="btn btn-xs btn-secondary" data-ans-qa="${qa.id}:HOTTER">HOTTER</button>
+                            <button class="btn btn-xs btn-secondary" data-ans-qa="${qa.id}:COLDER">COLDER</button>
+                            <button class="btn btn-xs btn-ghost" data-ans-custom="${qa.id}">Custom...</button>
                           </div>`
                     }
                   </div>`
@@ -680,19 +677,19 @@ class JetLagSydneyApp {
     if (s.game.rules.transitCosts || s.game.rules.winSectors) {
       const burn = s.activeTransitBurn;
       html += `<div class="card">
-        <div class="card-title">🏃 Tag & Transit Engine</div>
+        <div class="card-title">Tag & Transit Engine</div>
         ${
           s.game.rules.transitCosts
             ? burn
               ? `
                 <div class="sp-badge" style="border-color:#F99D1C;color:#F99D1C">
-                  🚆 Riding ${esc(burn.label)} (${burn.coinsPerMin} 🪙/min)<br/>
+                  Riding ${esc(burn.label)} (${burn.coinsPerMin} coins/min)<br/>
                   <span class="mono" data-burn-since="${burn.startedAt}" data-burn-rate="${burn.coinsPerMin}">00:00</span>
                 </div>
-                <button class="btn btn-danger btn-sm" id="btn-stop-burn">⏹️ Tap Off & Deduct Coins</button>
+                <button class="btn btn-danger btn-sm" id="btn-stop-burn">Tap Off & Deduct Coins</button>
               `
               : `
-                <div class="muted" style="font-size:11.5px">Tap on a transit mode to track real-time Tag coin cost:</div>
+                <div class="muted" style="font-size:11.5px">Tap onto a transit mode to track real-time Tag coin cost:</div>
                 <div class="row">
                   ${TRANSIT_RATES.map(
                     (tr) => `<button class="btn btn-xs btn-secondary" data-start-burn="${tr.mode}" style="border-color:${tr.color}">${tr.mode.replace('_', ' ').toUpperCase()} (${tr.coinsPerMin}/m)</button>`
@@ -706,7 +703,7 @@ class JetLagSydneyApp {
             ? `
               <div style="border-top:1px solid var(--border);padding-top:9px;display:flex;flex-direction:column;gap:8px">
                 <div class="row-between">
-                  <strong style="font-size:12.5px">🏁 Win Sectors (Origin: ${esc(s.winSectors.centerName)})</strong>
+                  <strong style="font-size:12.5px">Win Sectors (Origin: ${esc(s.winSectors.centerName)})</strong>
                   <span class="muted">${s.winSectors.count} slices</span>
                 </div>
                 <div class="grid-2">
@@ -730,15 +727,15 @@ class JetLagSydneyApp {
 
     // === MODE MODULE: RAIL RUSH ===
     if (s.game.rules.stationClaiming) {
-      const { teamStats, lineProgress } = computeRailRushStats(SYDNEY_NETWORK, s.claimedStations, s.teams, s.game.railRushLineBonus);
+      const { teamStats, lineProgress } = rrData;
       const activeLines = lineProgress.filter((l) => l.total > 0);
       html += `
         <div class="card">
           <div class="card-header">
-            <div class="card-title">🚄 Rail Rush Control</div>
+            <div class="card-title">Rail Rush Control</div>
             <span class="tag-pill">+${s.game.railRushLineBonus} Line Bonus</span>
           </div>
-          <button class="btn btn-primary btn-sm btn-block" id="btn-gps-checkin">📍 GPS Check-In Nearest Station</button>
+          <button class="btn btn-primary btn-sm btn-block" id="btn-gps-checkin">${icon('crosshair', 13)} GPS Check-In Nearest Station</button>
           <div class="grid-2">
             ${s.teams
               .map((t) => {
@@ -747,7 +744,7 @@ class JetLagSydneyApp {
                   <div class="feed-item" style="border-left:3px solid ${t.color}">
                     <strong style="font-size:12.5px">${esc(t.name)}</strong>
                     <div class="mono" style="font-size:16px;font-weight:800">${st.totalScore} pts</div>
-                    <div class="muted" style="font-size:11px">${st.stations} stops • ${st.completedLines.length} lines</div>
+                    <div class="muted" style="font-size:11px">${st.stations} stops · ${st.completedLines.length} lines</div>
                   </div>
                 `;
               })
@@ -792,7 +789,7 @@ class JetLagSydneyApp {
 
       html += `
         <div class="card">
-          <div class="card-title">🚩 Capture the Flag HQ</div>
+          <div class="card-title">Capture the Flag HQ</div>
           ${
             s.game.rules.dividingLine
               ? `
@@ -804,8 +801,8 @@ class JetLagSydneyApp {
                 </div>
                 ${
                   mySide
-                    ? `<div class="sp-badge" style="border-color:#f59e0b;color:#fbbf24">You are currently in: <strong>${esc(mySide === 'A' ? s.dividingLine.sideALabel : s.dividingLine.sideBLabel)}</strong></div>`
-                    : `<div class="muted" style="font-size:11.5px">Enable GPS to see live territory side detection across Sydney Harbour / Parramatta River!</div>`
+                    ? `<div class="sp-badge" style="border-color:#f59e0b;color:#fbbf24">Current Territory: <strong>${esc(mySide === 'A' ? s.dividingLine.sideALabel : s.dividingLine.sideBLabel)}</strong></div>`
+                    : `<div class="muted" style="font-size:11.5px">Enable GPS to see live territory side detection across Sydney Harbour and the Parramatta River.</div>`
                 }
               `
               : ''
@@ -813,7 +810,7 @@ class JetLagSydneyApp {
           ${
             s.game.rules.flags
               ? `
-                <div class="muted" style="font-size:11.5px">Tap any station on the map → "Drop Flag" to hide flags!</div>
+                <div class="muted" style="font-size:11.5px">Tap any station on the map and choose "Drop Flag" to place team flags.</div>
                 ${
                   s.flags.length
                     ? s.flags
@@ -822,19 +819,19 @@ class JetLagSydneyApp {
                           return `
                             <div class="feed-item" style="border-left:3px solid ${team?.color || '#F99D1C'}">
                               <div class="row-between">
-                                <strong>🚩 ${esc(fl.label)}</strong>
+                                <strong>${esc(fl.label)}</strong>
                                 <span class="tag-pill">${fl.status.toUpperCase()}</span>
                               </div>
                               <div class="row">
                                 <button class="btn btn-xs btn-secondary" data-flag-status="${fl.id}:carried">Pick Up</button>
-                                <button class="btn btn-xs btn-primary" data-flag-status="${fl.id}:captured">🏆 Capture (+1)</button>
+                                <button class="btn btn-xs btn-primary" data-flag-status="${fl.id}:captured">Capture (+1)</button>
                                 <button class="btn btn-xs btn-ghost" data-flag-status="${fl.id}:base">Reset</button>
-                                <button class="btn btn-xs btn-danger" data-flag-del="${fl.id}">✕</button>
+                                <button class="btn btn-xs btn-danger" data-flag-del="${fl.id}">${icon('x', 11)}</button>
                               </div>
                             </div>`;
                         })
                         .join('')
-                    : `<button class="btn btn-secondary btn-sm" id="btn-seed-ctf-flags">⚡ Auto-Place Demo Flags (North Sydney & Parramatta)</button>`
+                    : `<button class="btn btn-secondary btn-sm" id="btn-seed-ctf-flags">Place Starter Flags (North Sydney & Parramatta)</button>`
                 }
               `
               : ''
@@ -847,10 +844,10 @@ class JetLagSydneyApp {
     if (s.game.rules.checkpoints) {
       html += `
         <div class="card">
-          <div class="card-title">🏁 Race Across Sydney Checkpoints</div>
+          <div class="card-title">Race Across Sydney Checkpoints</div>
           <div class="row">
             <select id="race-preset-select" class="select" style="flex:1">
-              <option value="">Load a Sydney Race Preset…</option>
+              <option value="">Load a Sydney Race Preset...</option>
               ${RACE_PRESETS.map((rp) => `<option value="${rp.id}">${esc(rp.name)}</option>`).join('')}
             </select>
             <button class="btn btn-secondary btn-sm" id="btn-load-race-preset">Load</button>
@@ -870,15 +867,15 @@ class JetLagSydneyApp {
                             #${idx + 1} ${esc(cp.name)}
                           </button>
                           <div class="row">
-                            <button class="btn btn-xs ${myDone ? 'btn-accent' : 'btn-primary'}" data-toggle-cp="${cp.id}">${myDone ? '✓ Done' : 'Check In'}</button>
-                            <button class="btn btn-xs btn-ghost" data-del-cp="${cp.id}">✕</button>
+                            <button class="btn btn-xs ${myDone ? 'btn-accent' : 'btn-primary'}" data-toggle-cp="${cp.id}">${myDone ? 'Done' : 'Check In'}</button>
+                            <button class="btn btn-xs btn-ghost" data-del-cp="${cp.id}">${icon('x', 11)}</button>
                           </div>
                         </div>
                         ${doneTeams.length ? `<div class="muted" style="font-size:11px">Cleared by: ${esc(doneTeams.join(', '))}</div>` : ''}
                       </div>`;
                   })
                   .join('')
-              : `<div class="muted">Load a preset above or tap any station on the map → "+ Add Checkpoint"!</div>`
+              : `<div class="muted">Load a preset above or tap any station on the map and select "+ Add Checkpoint".</div>`
           }
         </div>
       `;
@@ -897,7 +894,7 @@ class JetLagSydneyApp {
     pane.querySelector('#btn-reset-game')?.addEventListener('click', () => {
       if (confirm('Reset scores, claims, flags, checkpoints, overlays, and timers for a new round?')) {
         store.resetGameOnly();
-        this.toast('Game reset cleanly!');
+        this.toast('Game reset cleanly.');
       }
     });
 
@@ -915,7 +912,7 @@ class JetLagSydneyApp {
           s.game.startedAt = Date.now();
         }
       }, 'clock');
-      store.addFeed({ type: 'system', text: `Hiding countdown started (${num} minutes)!` });
+      store.addFeed({ type: 'system', text: `Hiding countdown started (${num} minutes).` });
     });
 
     pane.querySelectorAll('[data-pick-mode]').forEach((btn) => {
@@ -932,7 +929,7 @@ class JetLagSydneyApp {
             s.teams[1].role = m.roles[1];
           }
         }, 'mode');
-        store.addFeed({ type: 'system', text: `Switched game mode to ${m.name}!` });
+        store.addFeed({ type: 'system', text: `Switched game mode to ${m.name}.` });
       });
     });
 
@@ -985,7 +982,7 @@ class JetLagSydneyApp {
             p.color = t.color;
           }
         }, 'teams');
-        this.toast('Switched team!');
+        this.toast('Switched team.');
       });
     });
 
@@ -1034,7 +1031,7 @@ class JetLagSydneyApp {
 
     pane.querySelector('#btn-hs-set-nearest')?.addEventListener('click', () => {
       const p = store.getLocalPlayer();
-      if (p?.lat == null) return this.toast('Enable GPS or place a Demo Pin (Live tab) — or tap any station on the map!');
+      if (p?.lat == null) return this.toast('Enable GPS or place a Demo Pin (Live tab), or tap any station on the map.');
       const nearest = this.mapCtrl.findNearestStation(p.lat, p.lng);
       if (nearest) this.setHidingZoneAt(nearest.station);
     });
@@ -1044,7 +1041,7 @@ class JetLagSydneyApp {
         if (s.hidingZone) s.hidingZone.revealed = !s.hidingZone.revealed;
       }, 'hideseek');
       const rev = store.get().hidingZone?.revealed;
-      store.addFeed({ type: 'system', text: rev ? 'Hiding Zone REVEALED to all players!' : 'Hiding Zone hidden again.' });
+      store.addFeed({ type: 'system', text: rev ? 'Hiding Zone revealed to all players.' : 'Hiding Zone hidden again.' });
     });
 
     pane.querySelectorAll('[data-qa-cat]').forEach((btn) => {
@@ -1088,7 +1085,7 @@ class JetLagSydneyApp {
           this.openRadarModal(p.lat, p.lng, 'My GPS', km);
         } else {
           this.selectMapTool('radar');
-          this.toast(`Tap anywhere on the map to place your ${km} km Radar!`);
+          this.toast(`Tap anywhere on the map to place your ${km} km Radar.`);
         }
       });
     });
@@ -1137,7 +1134,7 @@ class JetLagSydneyApp {
         s.activeTransitBurn = null;
       }, 'burn');
       store.addFeed({ type: 'system', text: `tapped off ${burn.label} after ${mins}m (-${cost} coins).` });
-      this.toast(`Deducted ${cost} coins (${mins} min ride)`);
+      this.toast(`Deducted ${cost} coins (${mins} min ride).`);
     });
 
     pane.querySelector('#ws-count')?.addEventListener('change', (e) => {
@@ -1150,7 +1147,7 @@ class JetLagSydneyApp {
     // Rail Rush
     pane.querySelector('#btn-gps-checkin')?.addEventListener('click', () => {
       const p = store.getLocalPlayer();
-      if (p?.lat == null) return this.toast('Turn on GPS or place a Demo Pin in the Live tab first!');
+      if (p?.lat == null) return this.toast('Turn on GPS or place a Demo Pin in the Live tab first.');
       const res = this.mapCtrl.findNearestStation(p.lat, p.lng);
       if (!res) return;
       if (res.distanceM > 500) {
@@ -1185,7 +1182,7 @@ class JetLagSydneyApp {
             if (myTeam) myTeam.points += 1;
           }
         }, 'ctf');
-        store.addFeed({ type: 'system', text: `updated flag status to ${status.toUpperCase()}!` });
+        store.addFeed({ type: 'system', text: `updated flag status to ${status.toUpperCase()}.` });
       });
     });
 
@@ -1203,7 +1200,7 @@ class JetLagSydneyApp {
         if (ns) s.flags.push({ id: uid('flg'), label: `${teams[0]?.name || 'North'} Flag`, teamId: teams[0]?.id, status: 'base', stationId: ns.id, lat: ns.lat, lng: ns.lng });
         if (parra) s.flags.push({ id: uid('flg'), label: `${teams[1]?.name || 'South'} Flag`, teamId: teams[1]?.id || teams[0]?.id, status: 'base', stationId: parra.id, lat: parra.lat, lng: parra.lng });
       }, 'ctf');
-      this.toast('Placed starter flags at North Sydney & Parramatta!');
+      this.toast('Placed starter flags at North Sydney and Parramatta.');
     });
 
     // Race Across Sydney
@@ -1217,7 +1214,7 @@ class JetLagSydneyApp {
         if (st) cps.push({ id: uid('cp'), stationId: st.id, name: st.name, lat: st.lat, lng: st.lng, order: idx + 1, completedBy: {} });
       });
       store.mutate((s) => { s.checkpoints = cps; }, 'race');
-      store.addFeed({ type: 'system', text: `loaded Race preset: ${preset.name} (${cps.length} checkpoints)!` });
+      store.addFeed({ type: 'system', text: `loaded Race preset: ${preset.name} (${cps.length} checkpoints).` });
       this.mapCtrl.fitGreaterSydney();
     });
 
@@ -1247,9 +1244,9 @@ class JetLagSydneyApp {
     }, 'claim');
     store.addFeed({
       type: 'challenge',
-      text: claim ? `claimed ${station.name} (${station.lines.join(', ')}) for ${myTeam.name}!` : `released claim on ${station.name}.`
+      text: claim ? `claimed ${station.name} (${station.lines.join(', ')}) for ${myTeam.name}.` : `released claim on ${station.name}.`
     });
-    this.toast(claim ? `Claimed ${station.name}!` : `Unclaimed ${station.name}`);
+    this.toast(claim ? `Claimed ${station.name}` : `Unclaimed ${station.name}`);
   }
 
   setHidingZoneAt(station) {
@@ -1266,7 +1263,7 @@ class JetLagSydneyApp {
         revealed: false
       };
     }, 'hideseek');
-    this.toast(`Hiding Zone locked at ${station.name} (${radiusM}m) — hidden from Seekers!`);
+    this.toast(`Hiding Zone locked at ${station.name} (${radiusM}m) — hidden from Seekers.`);
   }
 
   dropFlagAt(station) {
@@ -1282,7 +1279,7 @@ class JetLagSydneyApp {
         lng: station.lng
       });
     }, 'ctf');
-    store.addFeed({ type: 'system', text: `placed a flag for ${myTeam.name} at ${station.name}!` });
+    store.addFeed({ type: 'system', text: `placed a flag for ${myTeam.name} at ${station.name}.` });
   }
 
   addCheckpoint(station) {
@@ -1317,7 +1314,7 @@ class JetLagSydneyApp {
         nowDone = true;
       }
     }, 'race');
-    if (nowDone) store.addFeed({ type: 'challenge', text: `cleared Race Checkpoint: ${cpName} (+1 pt)!` });
+    if (nowDone) store.addFeed({ type: 'challenge', text: `cleared Race Checkpoint: ${cpName} (+1 pt).` });
   }
 
   answerQuestion(qaId, answer) {
@@ -1361,7 +1358,7 @@ class JetLagSydneyApp {
     const row = document.getElementById('wheel-filter-row');
     if (!row) return;
     if (this.wheelMode === 'curses') {
-      row.innerHTML = `<span class="muted">Spinning active Jet Lag Sydney Curse Deck (${store.get().decks.curses.filter((c) => c.active).length} active curses)</span>`;
+      row.innerHTML = `<span class="muted">Spinning active Sydney Curse Deck (${store.get().decks.curses.filter((c) => c.active).length} active curses)</span>`;
       return;
     }
     row.innerHTML = `
@@ -1399,25 +1396,25 @@ class JetLagSydneyApp {
     slot.innerHTML = `
       <div class="landed-card">
         <div class="row-between">
-          <span class="tag-pill" style="border-color:var(--accent);color:var(--accent)">${isCurse ? '💀 CURSE DRAWN' : `🎯 ${esc(card.difficulty || 'Challenge')}`}</span>
-          <span class="mono" style="font-weight:800;color:var(--accent)">${isCurse ? `Cost: ${card.cost} 🪙` : `+${reward} 🪙`}</span>
+          <span class="tag-pill" style="border-color:var(--accent);color:var(--accent)">${isCurse ? 'CURSE DRAWN' : esc(card.difficulty || 'Challenge').toUpperCase()}</span>
+          <span class="mono" style="font-weight:800;color:var(--accent)">${isCurse ? `Cost: ${card.cost} coins` : `+${reward} coins`}</span>
         </div>
         <h3>${esc(card.title)}</h3>
         <p class="muted" style="color:var(--text)">${esc(card.description)}</p>
         ${
           isCurse
             ? `
-              <div class="muted" style="font-size:11.5px">Duration: ${card.durationMins}m • Condition: ${esc(card.castingCondition || 'Standard')}</div>
+              <div class="muted" style="font-size:11.5px">Duration: ${card.durationMins}m · Condition: ${esc(card.castingCondition || 'Standard')}</div>
               <div class="row">
-                <button class="btn btn-danger btn-sm" id="btn-cast-landed-curse" style="flex:1">💀 Cast on Opponent</button>
+                <button class="btn btn-danger btn-sm" id="btn-cast-landed-curse" style="flex:1">Cast on Opponent</button>
                 <button class="btn btn-ghost btn-sm" id="btn-dismiss-landed">Dismiss</button>
               </div>
             `
             : `
-              <div class="muted" style="font-size:11.5px">Veto Penalty: ${card.vetoMins} mins ${myTeam?.doubleNext ? '• ⚡ 2× DOUBLE ACTIVE!' : ''}</div>
+              <div class="muted" style="font-size:11.5px">Veto Penalty: ${card.vetoMins} mins ${myTeam?.doubleNext ? '· 2X DOUBLE ACTIVE' : ''}</div>
               <div class="row">
                 <button class="btn btn-primary btn-sm" id="btn-accept-landed" style="flex:1">Accept</button>
-                <button class="btn btn-accent btn-sm" id="btn-complete-landed">✓ Complete</button>
+                <button class="btn btn-accent btn-sm" id="btn-complete-landed">Complete</button>
                 <button class="btn btn-danger btn-sm" id="btn-veto-landed">Veto (${card.vetoMins}m)</button>
               </div>
             `
@@ -1435,7 +1432,7 @@ class JetLagSydneyApp {
         const t = s.teams.find((x) => x.id === myTeam.id);
         if (t) t.activeChallenge = { ...card, acceptedAt: Date.now() };
       }, 'challenge');
-      store.addFeed({ type: 'challenge', text: `accepted challenge: "${card.title}" (+${reward} 🪙)!` });
+      store.addFeed({ type: 'challenge', text: `accepted challenge: "${card.title}" (+${reward} coins).` });
       this.landedCard = null;
       this.renderWheelLanded();
     });
@@ -1463,7 +1460,6 @@ class JetLagSydneyApp {
     const s = store.get();
     const myTeam = store.getLocalTeam();
 
-    // Active Challenge Slot
     const acSlot = document.getElementById('active-challenge-slot');
     if (acSlot) {
       const ac = myTeam?.activeChallenge;
@@ -1472,14 +1468,14 @@ class JetLagSydneyApp {
         acSlot.innerHTML = `
           <div class="card" style="border-color:var(--accent-2)">
             <div class="row-between">
-              <div class="card-title">🔥 Active Challenge</div>
-              <span class="mono" style="color:var(--accent);font-weight:800">+${reward} 🪙</span>
+              <div class="card-title">Active Challenge</div>
+              <span class="mono" style="color:var(--accent);font-weight:800">+${reward} coins</span>
             </div>
             <strong>${esc(ac.title)}</strong>
             <p class="muted">${esc(ac.description)}</p>
             <div class="row">
-              <button class="btn btn-primary btn-sm" id="btn-ac-complete" style="flex:1">✓ Complete & Claim</button>
-              <button class="btn btn-danger btn-sm" id="btn-ac-veto">🚫 Veto (${ac.vetoMins}m)</button>
+              <button class="btn btn-primary btn-sm" id="btn-ac-complete" style="flex:1">Complete & Claim</button>
+              <button class="btn btn-danger btn-sm" id="btn-ac-veto">Veto (${ac.vetoMins}m)</button>
             </div>
           </div>
         `;
@@ -1490,14 +1486,13 @@ class JetLagSydneyApp {
       }
     }
 
-    // Active Curses Slot
     const cuSlot = document.getElementById('active-curses-slot');
     if (cuSlot) {
       const liveCurses = (s.activeCurses || []).filter((c) => c.expiresAt > Date.now());
       cuSlot.innerHTML = liveCurses.length
         ? `
           <div class="card" style="border-color:rgba(239,68,68,0.45)">
-            <div class="card-title">💀 Active Curses (${liveCurses.length})</div>
+            <div class="card-title">Active Curses (${liveCurses.length})</div>
             ${liveCurses
               .map((c) => {
                 const target = s.teams.find((t) => t.id === c.targetTeamId);
@@ -1521,13 +1516,12 @@ class JetLagSydneyApp {
       });
     }
 
-    // Custom Deck Builder Slot
     const dbSlot = document.getElementById('deck-builder-slot');
     if (dbSlot) {
       dbSlot.innerHTML = `
         <div class="card">
           <div class="card-header">
-            <div class="card-title">🃏 Custom Deck Builder</div>
+            <div class="card-title">Custom Deck Builder</div>
             <button class="btn btn-xs btn-secondary" id="btn-toggle-deck-builder">${this.showDeckBuilder ? 'Collapse' : `Edit (${s.decks.challenges.length})`}</button>
           </div>
           ${
@@ -1548,17 +1542,17 @@ class JetLagSydneyApp {
                         <label class="row" style="flex:1;cursor:pointer">
                           <input type="checkbox" data-toggle-card="challenges:${c.id}" ${c.active ? 'checked' : ''} />
                           <div>
-                            <div style="font-size:12px;font-weight:700">${esc(c.title)} <span class="muted">(${c.coins} 🪙)</span></div>
-                            <div class="muted" style="font-size:11px">${esc(c.description.slice(0, 72))}…</div>
+                            <div style="font-size:12px;font-weight:700">${esc(c.title)} <span class="muted">(${c.coins} coins)</span></div>
+                            <div class="muted" style="font-size:11px">${esc(c.description.slice(0, 72))}...</div>
                           </div>
                         </label>
-                        <button class="btn btn-xs btn-ghost" data-del-card="challenges:${c.id}">🗑️</button>
+                        <button class="btn btn-xs btn-ghost" data-del-card="challenges:${c.id}" title="Delete card">${icon('trash', 12)}</button>
                       </div>`
                     )
                     .join('')}
                 </div>
               `
-              : `<div class="muted">Add your own Sydney challenges or curses, toggle cards on/off, or export/import custom decks for your group!</div>`
+              : `<div class="muted">Add your own Sydney challenges or curses, toggle cards on/off, or export/import custom decks for your group.</div>`
           }
         </div>
       `;
@@ -1590,7 +1584,7 @@ class JetLagSydneyApp {
               if (data.curses) st.decks.curses = data.curses;
             }, 'deck');
             this.refreshWheelPool();
-            this.toast('Imported custom Sydney deck!');
+            this.toast('Imported custom Sydney deck.');
           } catch {
             this.toast('Invalid deck JSON file.');
           }
@@ -1645,7 +1639,7 @@ class JetLagSydneyApp {
     }, 'challenge');
     store.addFeed({
       type: 'challenge',
-      text: `COMPLETED "${card.title}" (+${reward} 🪙, +1 pt${mult === 2 ? ' — 2× DOUBLED!' : ''})!`
+      text: `COMPLETED "${card.title}" (+${reward} coins, +1 pt${mult === 2 ? ' — 2X DOUBLED' : ''}).`
     });
     this.toast(`Completed! +${reward} coins`);
   }
@@ -1664,9 +1658,9 @@ class JetLagSydneyApp {
     }, 'challenge');
     store.addFeed({
       type: 'challenge',
-      text: `VETOED "${card.title}" — ${mins}-minute veto cooldown started!`
+      text: `VETOED "${card.title}" — ${mins}-minute veto cooldown started.`
     });
-    this.toast(`Vetoed! ${mins}m cooldown active.`);
+    this.toast(`Vetoed. ${mins}m cooldown active.`);
   }
 
   castCurse(curse) {
@@ -1690,15 +1684,14 @@ class JetLagSydneyApp {
         expiresAt: Date.now() + (curse.durationMins || 15) * 60000
       });
     }, 'curse');
-    store.addFeed({ type: 'curse', text: `CAST "${curse.title}" on ${opponent.name} (${curse.durationMins}m)! ${curse.description}` });
-    this.toast(`Curse cast on ${opponent.name}!`);
+    store.addFeed({ type: 'curse', text: `CAST "${curse.title}" on ${opponent.name} (${curse.durationMins}m): ${curse.description}` });
+    this.toast(`Curse cast on ${opponent.name}.`);
   }
 
   // ===== TAB 3: SHOP & FULL SYDNEY LINE EXPLORER =====
   renderShopPane() {
     const pane = document.getElementById('pane-shop');
     if (!pane) return;
-    const s = store.get();
     const myTeam = store.getLocalTeam();
     const groups = [
       { mode: 'train', label: 'Sydney Trains (T1–T9)' },
@@ -1711,15 +1704,15 @@ class JetLagSydneyApp {
     pane.innerHTML = `
       <div class="card">
         <div class="card-header">
-          <div class="card-title">🪙 Powerup Shop</div>
-          <span class="stat-pill" style="color:var(--accent)">${esc(myTeam.name)}: ${myTeam.coins} 🪙</span>
+          <div class="card-title">Powerup Shop</div>
+          <span class="stat-pill" style="color:var(--accent)">${esc(myTeam.name)}: ${myTeam.coins} coins</span>
         </div>
         ${POWERUPS_SHOP.map(
           (pw) => `
           <div class="feed-item">
             <div class="row-between">
-              <strong>${pw.icon} ${esc(pw.title)}</strong>
-              <button class="btn btn-xs btn-primary" data-buy-pw="${pw.id}">${pw.cost} 🪙</button>
+              <div class="row"><span class="pw-badge">${esc(pw.icon)}</span><strong>${esc(pw.title)}</strong></div>
+              <button class="btn btn-xs btn-primary" data-buy-pw="${pw.id}">${pw.cost} coins</button>
             </div>
             <div class="muted" style="font-size:11.5px">${esc(pw.description)}</div>
           </div>`
@@ -1728,7 +1721,7 @@ class JetLagSydneyApp {
 
       <div class="card">
         <div class="card-header">
-          <div class="card-title">🚇 Sydney Network Line Explorer</div>
+          <div class="card-title">Sydney Network Line Explorer</div>
           ${this.mapCtrl.isolatedLine ? `<button class="btn btn-xs btn-secondary" id="btn-show-all-lines">Show All</button>` : `<span class="muted">Tap to isolate</span>`}
         </div>
         ${groups
@@ -1762,7 +1755,7 @@ class JetLagSydneyApp {
         const pw = POWERUPS_SHOP.find((x) => x.id === btn.dataset.buyPw);
         if (!pw) return;
         const team = store.getLocalTeam();
-        if (team.coins < pw.cost) return this.toast(`Not enough coins! Need ${pw.cost} 🪙.`);
+        if (team.coins < pw.cost) return this.toast(`Not enough coins. Need ${pw.cost} coins.`);
         store.mutate((st) => {
           const t = st.teams.find((x) => x.id === team.id);
           if (!t) return;
@@ -1779,8 +1772,8 @@ class JetLagSydneyApp {
             }
           }
         }, 'powerup');
-        store.addFeed({ type: 'system', text: `bought powerup: ${pw.icon} ${pw.title} (-${pw.cost} 🪙)!` });
-        this.toast(`Activated ${pw.title}!`);
+        store.addFeed({ type: 'system', text: `bought powerup: ${pw.title} (-${pw.cost} coins).` });
+        this.toast(`Activated ${pw.title}.`);
       });
     });
 
@@ -1810,11 +1803,11 @@ class JetLagSydneyApp {
 
     pane.innerHTML = `
       <div class="card">
-        <div class="card-title">📸 Post Update / Photo Proof</div>
+        <div class="card-title">Post Update / Photo Proof</div>
         <div class="row" style="gap:6px">
-          <input type="text" id="feed-msg-input" class="input" placeholder="Send message, clue, or proof note…" style="flex:1" />
+          <input type="text" id="feed-msg-input" class="input" placeholder="Send message, clue, or proof note..." style="flex:1" />
           <label class="btn btn-secondary btn-sm" title="Attach compressed camera photo proof">
-            📷
+            ${icon('camera', 14)}
             <input type="file" id="feed-photo-input" accept="image/*" capture="environment" style="display:none" />
           </label>
           <button class="btn btn-primary btn-sm" id="btn-send-feed">Send</button>
@@ -1828,7 +1821,7 @@ class JetLagSydneyApp {
 
       <div class="card" style="flex:1">
         <div class="card-header">
-          <div class="card-title">💬 Live Timeline</div>
+          <div class="card-title">Live Timeline</div>
           <div class="row" style="gap:4px">
             ${[
               ['all', 'All'],
@@ -1867,7 +1860,7 @@ class JetLagSydneyApp {
       if (!text && !this.pendingPhotoDataUrl) return;
       store.addFeed({
         type: 'chat',
-        text: text || 'Sent a photo proof 📷',
+        text: text || 'Attached photo proof.',
         photoDataUrl: this.pendingPhotoDataUrl
       });
       this.pendingPhotoDataUrl = null;
@@ -1884,7 +1877,7 @@ class JetLagSydneyApp {
       if (!file) return;
       try {
         this.pendingPhotoDataUrl = await compressImageFile(file);
-        this.toast('Photo compressed & ready to send!');
+        this.toast('Photo compressed and ready to send.');
         this.renderFeedPane();
       } catch {
         this.toast('Could not process photo.');
@@ -1921,9 +1914,8 @@ class JetLagSydneyApp {
     const players = Object.values(s.players || {});
 
     pane.innerHTML = `
-      <!-- Player Profile & Live GPS -->
       <div class="card">
-        <div class="card-title">🛰️ Player Identity & Live GPS</div>
+        <div class="card-title">Player Identity & Live GPS</div>
         <div class="grid-2">
           <div class="field">
             <label>Your Name</label>
@@ -1939,16 +1931,16 @@ class JetLagSydneyApp {
 
         <div class="row">
           <button class="btn ${s.room.shareGps ? 'btn-danger' : 'btn-primary'} btn-sm" id="btn-toggle-gps" style="flex:1">
-            ${s.room.shareGps ? '⏹️ Stop Live GPS' : '📍 Start Live GPS'}
+            ${icon('crosshair', 13)} ${s.room.shareGps ? 'Stop Live GPS' : 'Start Live GPS'}
           </button>
-          <button class="btn btn-secondary btn-sm" id="btn-toggle-hide-gps">${me.gpsHidden ? '👁️ Show My Pin' : '🙈 Hide My Pin'}</button>
-          <button class="btn btn-secondary btn-sm" id="btn-toggle-freeze-gps">${me.gpsFrozen ? '🔥 Unfreeze' : '❄️ Freeze'}</button>
+          <button class="btn btn-secondary btn-sm" id="btn-toggle-hide-gps">${me.gpsHidden ? 'Show Pin' : 'Hide Pin'}</button>
+          <button class="btn btn-secondary btn-sm" id="btn-toggle-freeze-gps">${me.gpsFrozen ? 'Unfreeze' : 'Freeze'}</button>
         </div>
 
         ${
           nearest
-            ? `<div class="sp-badge" style="border-color:var(--accent-2);color:#2dd4bf">Nearest Stop: <strong>${esc(nearest.station.name)}</strong> (${formatDistance(nearest.distanceM)}) • ${nearest.station.lines.join(', ')}</div>`
-            : `<div class="muted" style="font-size:11.5px">No GPS fix yet. Testing indoors? Drop a quick Demo GPS pin anywhere in Sydney:</div>`
+            ? `<div class="sp-badge" style="border-color:var(--accent-2);color:#2dd4bf">Nearest Stop: <strong>${esc(nearest.station.name)}</strong> (${formatDistance(nearest.distanceM)}) · ${nearest.station.lines.join(', ')}</div>`
+            : `<div class="muted" style="font-size:11.5px">No GPS fix yet. Testing indoors? Place a Demo GPS pin anywhere in Sydney:</div>`
         }
         <div class="row" style="gap:4px">
           ${[
@@ -1958,15 +1950,14 @@ class JetLagSydneyApp {
             ['Manly', -33.80045, 151.28371],
             ['Chatswood', -33.79749, 151.18111]
           ]
-            .map(([lbl, lat, lng]) => `<button class="btn btn-xs btn-ghost" data-demo-gps="${lat},${lng},${lbl}">📌 ${lbl}</button>`)
+            .map(([lbl, lat, lng]) => `<button class="btn btn-xs btn-ghost" data-demo-gps="${lat},${lng},${lbl}">${lbl}</button>`)
             .join('')}
         </div>
       </div>
 
-      <!-- Engine 1: Zero-Setup PeerJS Room Codes -->
       <div class="card">
         <div class="card-header">
-          <div class="card-title">⚡ Instant Live Room (Zero Setup)</div>
+          <div class="card-title">Instant Live Room</div>
           <span class="tag-pill" style="${s.room.connected ? 'border-color:#22c55e;color:#4ade80' : ''}">${esc(s.room.statusText)}</span>
         </div>
         ${
@@ -1975,13 +1966,13 @@ class JetLagSydneyApp {
               <div class="room-code-big">${esc(s.room.code)}</div>
               <div class="qr-box" id="room-qr-box"></div>
               <div class="row">
-                <button class="btn btn-primary btn-sm" id="btn-copy-invite" style="flex:1">📋 Copy Invite Link</button>
+                <button class="btn btn-primary btn-sm" id="btn-copy-invite" style="flex:1">${icon('copy', 13)} Copy Invite Link</button>
                 <button class="btn btn-danger btn-sm" id="btn-leave-room">Leave Room</button>
               </div>
             `
             : `
-              <div class="muted" style="font-size:12px">Start a live room right now with zero accounts (WebRTC P2P + multi-tab sync) and invite opponents via Room Code or QR!</div>
-              <button class="btn btn-primary btn-block" id="btn-host-peer">🚀 Create Live Room</button>
+              <div class="muted" style="font-size:12px">Start a live room immediately with zero accounts (WebRTC P2P + multi-tab sync) and invite opponents via Room Code or QR.</div>
+              <button class="btn btn-primary btn-block" id="btn-host-peer">Create Live Room</button>
               <div class="row">
                 <input type="text" id="inp-join-code" class="input mono" placeholder="Enter code e.g. SYD-4K9P" style="flex:1;text-transform:uppercase" value="${esc(s.room.code)}" />
                 <button class="btn btn-accent" id="btn-join-peer">Join</button>
@@ -1990,11 +1981,10 @@ class JetLagSydneyApp {
         }
       </div>
 
-      <!-- Engine 2: Tunnel-Proof Firebase Realtime Database -->
       <div class="card">
-        <div class="card-title">🔥 Tunnel-Proof Firebase Sync (Optional)</div>
+        <div class="card-title">Tunnel-Proof Firebase Sync (Optional)</div>
         <div class="muted" style="font-size:11.5px">
-          Best for real Sydney outdoor game days through Metro tunnels & locked phone screens! Paste your free Firebase Realtime DB URL (Singapore region recommended):
+          Recommended for outdoor Sydney game days through Metro tunnels and locked phone screens. Paste your free Firebase Realtime DB URL:
         </div>
         <div class="field">
           <label>Firebase Realtime Database URL</label>
@@ -2006,9 +1996,8 @@ class JetLagSydneyApp {
         </div>
       </div>
 
-      <!-- Connected Players Roster -->
       <div class="card">
-        <div class="card-title">👥 Players in Session (${players.length})</div>
+        <div class="card-title">Players in Session (${players.length})</div>
         ${players
           .map((p) => {
             const t = s.teams.find((x) => x.id === p.teamId);
@@ -2019,16 +2008,15 @@ class JetLagSydneyApp {
                   <strong style="font-size:13px">${esc(p.name)} ${p.id === s.localPlayerId ? '(You)' : ''}</strong>
                 </div>
                 <span class="muted" style="font-size:11px">
-                  ${esc(t?.name || '')} • ${p.gpsFrozen ? '❄️ Frozen' : p.gpsHidden ? '🙈 Hidden' : p.lat != null ? '📍 GPS Live' : 'No GPS'}
+                  ${esc(t?.name || '')} · ${p.gpsFrozen ? 'Frozen' : p.gpsHidden ? 'Hidden' : p.lat != null ? 'GPS Live' : 'No GPS'}
                 </span>
               </div>`;
           })
           .join('')}
       </div>
 
-      <!-- Full Game JSON Backup -->
       <div class="card">
-        <div class="card-title">💾 Save / Share Full Game Snapshot</div>
+        <div class="card-title">Save / Share Full Game Snapshot</div>
         <div class="row">
           <button class="btn btn-secondary btn-sm" id="btn-export-game" style="flex:1">Export Game JSON</button>
           <button class="btn btn-secondary btn-sm" id="btn-import-game" style="flex:1">Import Game JSON</button>
@@ -2036,7 +2024,6 @@ class JetLagSydneyApp {
       </div>
     `;
 
-    // Render scannable QR code if connected
     if (s.room.connected && window.qrcode) {
       const qrBox = pane.querySelector('#room-qr-box');
       if (qrBox) {
@@ -2049,7 +2036,6 @@ class JetLagSydneyApp {
       }
     }
 
-    // Bind Live Pane events
     pane.querySelector('#inp-player-name').addEventListener('change', (e) => {
       const v = e.target.value.trim() || 'Player';
       store.mutate((st) => { st.players[st.localPlayerId].name = v; }, 'profile');
@@ -2110,7 +2096,7 @@ class JetLagSydneyApp {
       const url = this.mp.getInviteUrl();
       try {
         await navigator.clipboard.writeText(url);
-        this.toast('Invite link copied to clipboard!');
+        this.toast('Invite link copied to clipboard.');
       } catch {
         prompt('Copy invite link:', url);
       }
@@ -2138,7 +2124,7 @@ class JetLagSydneyApp {
         try {
           const snap = JSON.parse(await inp.files[0].text());
           store.applySharedSnapshot(snap);
-          this.toast('Imported game snapshot!');
+          this.toast('Imported game snapshot.');
         } catch {
           this.toast('Invalid game JSON file.');
         }
@@ -2159,7 +2145,7 @@ class JetLagSydneyApp {
 
   openRadarModal(lat, lng, label = '', defaultKm = 2) {
     this.openModal(`
-      <div class="card-title">📡 Place Radar Overlay ${label ? `(${esc(label)})` : ''}</div>
+      <div class="card-title">Place Radar Overlay ${label ? `(${esc(label)})` : ''}</div>
       <div class="field">
         <label>Radius (km)</label>
         <div class="row">
@@ -2196,11 +2182,11 @@ class JetLagSydneyApp {
 
   openThermometerModal(pA, pB) {
     this.openModal(`
-      <div class="card-title">🌡️ Thermometer Result</div>
+      <div class="card-title">Thermometer Result</div>
       <p class="muted">Moving from Point A to Point B, did the Hider answer HOTTER (closer to B) or COLDER (closer to A)?</p>
       <div class="grid-2">
-        <button class="btn btn-primary" id="m-th-hot">🔥 HOTTER (Shade A Side)</button>
-        <button class="btn btn-accent" id="m-th-cold">❄️ COLDER (Shade B Side)</button>
+        <button class="btn btn-primary" id="m-th-hot">HOTTER (Shade A Side)</button>
+        <button class="btn btn-accent" id="m-th-cold">COLDER (Shade B Side)</button>
       </div>
       <button class="btn btn-ghost btn-sm" id="m-th-cancel">Cancel</button>
     `);
@@ -2219,7 +2205,7 @@ class JetLagSydneyApp {
 
   openPinModal(lat, lng) {
     this.openModal(`
-      <div class="card-title">📍 Drop Tactical Map Pin</div>
+      <div class="card-title">Drop Tactical Map Pin</div>
       <div class="field">
         <label>Pin Label</label>
         <input type="text" id="m-pin-label" class="input" placeholder="e.g. Suspected Hider, Flag, Veto Spot" value="Tactical Pin" />
@@ -2241,14 +2227,14 @@ class JetLagSydneyApp {
   openAddCardModal(kind) {
     const isChallenge = kind === 'challenge';
     this.openModal(`
-      <div class="card-title">${isChallenge ? '🎯 Add Custom Challenge' : '💀 Add Custom Curse'}</div>
+      <div class="card-title">${isChallenge ? 'Add Custom Challenge' : 'Add Custom Curse'}</div>
       <div class="field">
         <label>Title</label>
         <input type="text" id="mc-title" class="input" placeholder="e.g. Ferry Race to Balmain" />
       </div>
       <div class="field">
         <label>Description</label>
-        <textarea id="mc-desc" class="textarea" placeholder="Full rules and proof requirements…"></textarea>
+        <textarea id="mc-desc" class="textarea" placeholder="Full rules and proof requirements..."></textarea>
       </div>
       <div class="grid-2">
         <div class="field">
@@ -2311,7 +2297,7 @@ class JetLagSydneyApp {
       }, 'deck');
       this.refreshWheelPool();
       this.closeModal();
-      this.toast(`Added "${title}" to custom deck!`);
+      this.toast(`Added "${title}" to custom deck.`);
     };
     document.getElementById('mc-cancel').onclick = () => this.closeModal();
   }
