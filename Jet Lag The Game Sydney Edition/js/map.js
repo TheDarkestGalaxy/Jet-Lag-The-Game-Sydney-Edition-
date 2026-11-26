@@ -1,7 +1,7 @@
 // Interactive Real-World Sydney Transit Map & Jet Lag Strategy Toolkit (Leaflet)
 import { SYDNEY_NETWORK } from '../data/sydney-network.js';
-import { store, uid } from './state.js?v=11';
-import { haversineM, formatDistance, canSeePlayerGps, getDividingSide, getAccess } from './modes.js?v=11';
+import { store, uid } from './state.js?v=12';
+import { haversineM, formatDistance, canSeePlayerGps, getDividingSide, getAccess } from './modes.js?v=12';
 
 const BASEMAPS = {
   dark: {

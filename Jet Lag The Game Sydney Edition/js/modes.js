@@ -307,20 +307,27 @@ export function getAccess(state) {
   const isGm = Boolean(me?.isEventHost || me?.accessLevel === 'gm');
   const isPermitted = isGm || me?.accessLevel === 'co_host';
   const perms = state.permissions || {};
+  const gameActive = state.game?.status === 'running' || state.game?.status === 'paused';
+  const isGuest = Boolean(state.room?.connected && !state.room?.isHost);
 
-  // If no GM exists in the session (solo / casual group play), everyone has normal access;
-  // Once a GM exists, standard players are restricted according to GM permission locks!
+  // Once a GM exists, standard players are restricted according to GM permission locks
   const restricted = gmExists && !isPermitted;
 
   return {
     gmExists,
     isGm,
     isPermitted,
+    gameActive,
+    isGuest,
     canEditRules: !restricted || !perms.lockRulesToGm,
     canEditScores: !restricted || !perms.lockScoresToGm,
     canEditTeams: !restricted || !perms.lockTeamsToGm,
     canEditDeck: !restricted || !perms.lockDeckToGm,
-    canClaimGm: isGm || !gmExists,
+    // Roles (Playing <-> Game Master) CANNOT be switched once the game has started,
+    // and joining guests cannot self-promote to GM!
+    canClaimGm: !gameActive && !isGm && !gmExists && !isGuest,
+    canStepDownGm: !gameActive && isGm,
+    canSwitchRole: !gameActive && (isGm || (!gmExists && !isGuest)),
     canUseDemoGps: isGm || Boolean(perms.allowDemoGps) || (!gmExists && !state.room?.connected),
     mustVerifyGps: !isGm && Boolean(perms.strictGpsProximity),
     canRenameSelf: isGm || !me?.nameLocked || !perms.lockNamesAfterJoin

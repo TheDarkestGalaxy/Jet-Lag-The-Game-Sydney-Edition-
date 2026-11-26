@@ -1,7 +1,7 @@
 // Jet Lag: Sydney Edition — Mobile-First Main Application Orchestrator
 import { SYDNEY_NETWORK } from '../data/sydney-network.js';
-import { CHALLENGE_CATEGORIES, POWERUPS_SHOP, TRANSIT_RATES, DEFAULT_CHALLENGES, DEFAULT_CURSES } from '../data/challenges.js?v=11';
-import { store, uid } from './state.js?v=11';
+import { CHALLENGE_CATEGORIES, POWERUPS_SHOP, TRANSIT_RATES, DEFAULT_CHALLENGES, DEFAULT_CURSES } from '../data/challenges.js?v=12';
+import { store, uid } from './state.js?v=12';
 import {
   GAME_MODES,
   RULE_MODULES,
@@ -14,11 +14,11 @@ import {
   formatClock,
   getDividingSide,
   getAccess
-} from './modes.js?v=11';
-import { SydneyMapController } from './map.js?v=11';
-import { ChallengeWheel } from './wheel.js?v=11';
-import { MultiplayerManager, generateRoomCode, normalizeRoomCode, compressImageFile } from './multiplayer.js?v=11';
-import { icon } from './icons.js?v=11';
+} from './modes.js?v=12';
+import { SydneyMapController } from './map.js?v=12';
+import { ChallengeWheel } from './wheel.js?v=12';
+import { MultiplayerManager, generateRoomCode, normalizeRoomCode, compressImageFile } from './multiplayer.js?v=12';
+import { icon } from './icons.js?v=12';
 
 function esc(str) {
   return String(str ?? '')
@@ -141,7 +141,7 @@ class JetLagSydneyApp {
           caches.keys().then((keys) => keys.forEach((k) => caches.delete(k))).catch(() => {});
         }
       } else if (location.protocol === 'https:') {
-        navigator.serviceWorker.register('./sw.js?v=11').then((reg) => reg.update()).catch(() => {});
+        navigator.serviceWorker.register('./sw.js?v=12').then((reg) => reg.update()).catch(() => {});
       }
     }
 
@@ -749,7 +749,7 @@ class JetLagSydneyApp {
               <span class="host-pill">GAME MASTER</span>
               <strong style="font-family:var(--font-display)">Host Control Console</strong>
             </div>
-            <button class="btn btn-xs btn-secondary" id="btn-gm-exit">Step Down</button>
+            ${access.canStepDownGm ? `<button class="btn btn-xs btn-secondary" id="btn-gm-exit">Step Down</button>` : `<span class="tag-pill">${icon('lock', 11)} Locked In-Game</span>`}
           </div>
           <div class="muted" style="font-size:11.5px">
             Full GM authority active — players cannot alter locked rules, scores, teams, names, or bypass GPS checks unless you grant permission in the Live tab.
@@ -982,20 +982,25 @@ class JetLagSydneyApp {
       const cats = ['Radar', 'Thermometer', 'Matching', 'Measuring', 'Tentacles', 'Photo'];
       const qList = s.decks.questions.filter((q) => q.category === this.qaCategoryFilter);
       const hz = s.hidingZone;
-      const canSeeHz = hz && (hz.revealed || hz.setByTeamId === myTeam?.id);
+      const canSeeHz = hz && (isHostGm || hz.revealed || hz.setByTeamId === myTeam?.id);
+      const canManageHz = isHostGm || myTeam?.role === 'hider' || !access.gmExists;
 
       html += `
         <div class="card">
           <div class="card-header">
             <div class="card-title">Hide + Seek HQ</div>
-            <select id="hs-radius-select" class="select" style="width:auto;padding:4px 8px;font-size:12px">
+            <select id="hs-radius-select" class="select" style="width:auto;padding:4px 8px;font-size:12px" ${access.canEditRules ? '' : 'disabled'}>
               ${[500, 800, 1000, 1500, 2000].map((r) => `<option value="${r}" ${s.game.hidingRadiusM === r ? 'selected' : ''}>Zone: ${r}m</option>`).join('')}
             </select>
           </div>
-          <div class="row">
-            <button class="btn btn-accent btn-sm" id="btn-hs-set-nearest" style="flex:1">${icon('pin', 13)} Set Zone at Nearest Stop</button>
-            ${hz ? `<button class="btn btn-secondary btn-sm" id="btn-hs-reveal">${hz.revealed ? 'Hide Zone' : 'Reveal'}</button>` : ''}
-          </div>
+          ${
+            canManageHz
+              ? `<div class="row">
+                  <button class="btn btn-accent btn-sm" id="btn-hs-set-nearest" style="flex:1">${icon('pin', 13)} Set Zone at Nearest Stop</button>
+                  ${hz ? `<button class="btn btn-secondary btn-sm" id="btn-hs-reveal">${hz.revealed ? 'Hide Zone' : 'Reveal'}</button>` : ''}
+                </div>`
+              : ''
+          }
           ${canSeeHz ? `<div class="sp-badge" style="border-color:#168388;color:#2dd4bf">Hiding Zone: ${esc(hz.stationName)} (${hz.radiusM}m) ${hz.revealed ? '— REVEALED' : '— Private'}</div>` : ''}
 
           <div style="border-top:1px solid var(--border);padding-top:9px;display:flex;flex-direction:column;gap:8px">
@@ -1097,13 +1102,13 @@ class JetLagSydneyApp {
                 <div class="grid-2">
                   <div class="field">
                     <label>Sectors</label>
-                    <select id="ws-count" class="select">
+                    <select id="ws-count" class="select" ${access.canEditRules ? '' : 'disabled'}>
                       ${[2, 3, 4].map((n) => `<option value="${n}" ${s.winSectors.count === n ? 'selected' : ''}>${n} Sectors</option>`).join('')}
                     </select>
                   </div>
                   <div class="field">
                     <label>Rotation (${s.winSectors.rotationDeg}°)</label>
-                    <input type="range" id="ws-rot" min="-180" max="180" step="5" value="${s.winSectors.rotationDeg}" />
+                    <input type="range" id="ws-rot" min="-180" max="180" step="5" value="${s.winSectors.rotationDeg}" ${access.canEditRules ? '' : 'disabled'} />
                   </div>
                 </div>
               </div>
@@ -1181,7 +1186,7 @@ class JetLagSydneyApp {
               ? `
                 <div class="field">
                   <label>Dividing Line</label>
-                  <select id="ctf-preset-select" class="select">
+                  <select id="ctf-preset-select" class="select" ${access.canEditRules ? '' : 'disabled'}>
                     ${CTF_PRESETS.map((p) => `<option value="${p.id}" ${s.dividingLine.id === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
                   </select>
                 </div>
@@ -1210,13 +1215,15 @@ class JetLagSydneyApp {
                               <div class="row">
                                 <button class="btn btn-xs btn-secondary" data-flag-status="${fl.id}:carried">Pick Up</button>
                                 <button class="btn btn-xs btn-primary" data-flag-status="${fl.id}:captured">Capture (+1)</button>
-                                <button class="btn btn-xs btn-ghost" data-flag-status="${fl.id}:base">Reset</button>
-                                <button class="btn btn-xs btn-danger" data-flag-del="${fl.id}">${icon('x', 11)}</button>
+                                ${access.canEditRules ? `<button class="btn btn-xs btn-ghost" data-flag-status="${fl.id}:base">Reset</button>` : ''}
+                                ${access.canEditRules ? `<button class="btn btn-xs btn-danger" data-flag-del="${fl.id}">${icon('x', 11)}</button>` : ''}
                               </div>
                             </div>`;
                         })
                         .join('')
-                    : `<button class="btn btn-secondary btn-sm" id="btn-seed-ctf-flags">Place Starter Flags (North Sydney & Parramatta)</button>`
+                    : access.canEditRules
+                      ? `<button class="btn btn-secondary btn-sm" id="btn-seed-ctf-flags">Place Starter Flags (North Sydney & Parramatta)</button>`
+                      : `<div class="muted" style="font-size:11.5px">Waiting for Game Master to place flags.</div>`
                 }
               `
               : ''
@@ -1229,13 +1236,17 @@ class JetLagSydneyApp {
       html += `
         <div class="card">
           <div class="card-title">Race Checkpoints</div>
-          <div class="row">
-            <select id="race-preset-select" class="select" style="flex:1">
-              <option value="">Load a Sydney Race Preset...</option>
-              ${RACE_PRESETS.map((rp) => `<option value="${rp.id}">${esc(rp.name)}</option>`).join('')}
-            </select>
-            <button class="btn btn-secondary btn-sm" id="btn-load-race-preset">Load</button>
-          </div>
+          ${
+            access.canEditRules
+              ? `<div class="row">
+                  <select id="race-preset-select" class="select" style="flex:1">
+                    <option value="">Load a Sydney Race Preset...</option>
+                    ${RACE_PRESETS.map((rp) => `<option value="${rp.id}">${esc(rp.name)}</option>`).join('')}
+                  </select>
+                  <button class="btn btn-secondary btn-sm" id="btn-load-race-preset">Load</button>
+                </div>`
+              : ''
+          }
           ${
             s.checkpoints.length
               ? s.checkpoints
@@ -1252,7 +1263,7 @@ class JetLagSydneyApp {
                           </button>
                           <div class="row">
                             <button class="btn btn-xs ${myDone ? 'btn-accent' : 'btn-primary'}" data-toggle-cp="${cp.id}">${myDone ? 'Done' : 'Check In'}</button>
-                            <button class="btn btn-xs btn-ghost" data-del-cp="${cp.id}">${icon('x', 11)}</button>
+                            ${access.canEditRules ? `<button class="btn btn-xs btn-ghost" data-del-cp="${cp.id}">${icon('x', 11)}</button>` : ''}
                           </div>
                         </div>
                         ${doneTeams.length ? `<div class="muted" style="font-size:11px">Cleared by: ${esc(doneTeams.join(', '))}</div>` : ''}
@@ -1785,15 +1796,22 @@ class JetLagSydneyApp {
 
   // ===== GAME ACTION HELPERS =====
   setEventHostMode(enabled) {
-    const access = getAccess(store.get());
-    if (enabled && !access.canClaimGm) {
-      return this.toast('A Game Master is already active. Ask them to grant you Co-Host permission.');
+    const s = store.get();
+    const access = getAccess(s);
+    if (access.gameActive) {
+      return this.toast('Roles are locked while the game is active. Reset to Lobby to switch.');
     }
-    if (enabled && store.get().room.shareGps) {
+    if (enabled && !access.canClaimGm) {
+      return this.toast(access.gmExists ? 'A Game Master is already active.' : 'Only the room host can claim Game Master — ask them for permission.');
+    }
+    if (!enabled && !access.canStepDownGm) {
+      return;
+    }
+    if (enabled && s.room.shareGps) {
       this.mp.stopGps();
     }
-    store.mutate((s) => {
-      const p = s.players[s.localPlayerId];
+    store.mutate((st) => {
+      const p = st.players[st.localPlayerId];
       if (!p) return;
       p.isEventHost = Boolean(enabled);
       p.accessLevel = enabled ? 'gm' : 'player';
@@ -1801,7 +1819,7 @@ class JetLagSydneyApp {
         p.teamId = null;
         p.gpsHidden = true;
       } else {
-        const firstTeam = s.teams[0];
+        const firstTeam = st.teams[0];
         p.teamId = firstTeam?.id || 'team-a';
         p.color = firstTeam?.color || '#F99D1C';
         p.gpsHidden = false;
@@ -2151,6 +2169,7 @@ class JetLagSydneyApp {
     // Active Curses
     const cuSlot = document.getElementById('active-curses-slot');
     if (cuSlot) {
+      const canClearCurse = getAccess(s).canEditScores;
       const liveCurses = (s.activeCurses || []).filter((c) => c.expiresAt > Date.now());
       cuSlot.innerHTML = liveCurses.length
         ? `
@@ -2166,7 +2185,7 @@ class JetLagSydneyApp {
                       <span class="mono" style="color:#f87171;font-size:12px" data-countdown-until="${c.expiresAt}">${formatClock(c.expiresAt - Date.now())}</span>
                     </div>
                     <div class="muted" style="font-size:11.5px">Target: <strong>${esc(target?.name || 'Opponents')}</strong> — ${esc(c.description)}</div>
-                    <button class="btn btn-xs btn-ghost" data-clear-curse="${c.id}">Clear Curse</button>
+                    ${canClearCurse ? `<button class="btn btn-xs btn-ghost" data-clear-curse="${c.id}">Clear Curse</button>` : ''}
                   </div>`;
               })
               .join('')}
@@ -2747,9 +2766,10 @@ class JetLagSydneyApp {
           ${me.isEventHost ? '<span class="host-pill">GAME MASTER</span>' : access.isPermitted ? '<span class="tag-pill" style="border-color:#a855f7;color:#c084fc">PERMITTED CO-HOST</span>' : '<span class="tag-pill">PLAYER</span>'}
         </div>
         <div class="seg-bar" style="grid-template-columns:repeat(2,1fr)">
-          <button class="seg-btn ${!me.isEventHost ? 'active' : ''}" id="btn-role-player">Playing</button>
-          <button class="seg-btn ${me.isEventHost ? 'active' : ''}" id="btn-role-host" ${access.canClaimGm ? '' : 'disabled title="A Game Master is already active"'}>${access.canClaimGm || me.isEventHost ? 'Host Event (GM)' : 'GM Active'}</button>
+          <button class="seg-btn ${!me.isEventHost ? 'active' : ''}" id="btn-role-player" ${access.canStepDownGm || !me.isEventHost ? '' : 'disabled title="Reset game to Lobby to step down"'} ${access.gameActive && !me.isEventHost ? 'disabled' : ''}>Playing</button>
+          <button class="seg-btn ${me.isEventHost ? 'active' : ''}" id="btn-role-host" ${access.canClaimGm ? '' : 'disabled title="Locked while game is active or GM already set"'}>${me.isEventHost ? 'Game Master (GM)' : access.gameActive ? 'Locked In-Game' : access.gmExists ? 'GM Active' : access.isGuest ? 'Host Only' : 'Host Event (GM)'}</button>
         </div>
+        ${access.gameActive ? `<div class="muted" style="font-size:11px">Roles are locked while the game is running. Reset to Lobby to switch Playing / GM.</div>` : ''}
         <div class="grid-2">
           <div class="field">
             <label>Your Name ${!access.canRenameSelf ? '(Locked)' : ''}</label>
@@ -2899,7 +2919,7 @@ class JetLagSydneyApp {
         </label>
         <div class="row">
           <button class="btn btn-secondary btn-sm" id="btn-export-game" style="flex:1">Export Game JSON</button>
-          <button class="btn btn-secondary btn-sm" id="btn-import-game" style="flex:1">Import Game JSON</button>
+          ${access.canEditRules ? `<button class="btn btn-secondary btn-sm" id="btn-import-game" style="flex:1">Import Game JSON</button>` : ''}
         </div>
       </div>
     `;
@@ -3172,7 +3192,8 @@ class JetLagSydneyApp {
       a.click();
     });
 
-    pane.querySelector('#btn-import-game').addEventListener('click', () => {
+    pane.querySelector('#btn-import-game')?.addEventListener('click', () => {
+      if (!getAccess(store.get()).canEditRules) return this.toast('Only the Game Master can import a game snapshot.');
       const inp = document.createElement('input');
       inp.type = 'file';
       inp.accept = 'application/json';

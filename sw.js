@@ -1,19 +1,19 @@
-const CACHE_NAME = 'jetlag-sydney-v11';
+const CACHE_NAME = 'jetlag-sydney-v12';
 const APP_SHELL = [
   './',
   './index.html',
   './manifest.json',
   './assets/icon.svg',
-  './css/styles.css?v=11',
+  './css/styles.css?v=12',
   './data/sydney-network.js',
-  './data/challenges.js?v=11',
-  './js/icons.js?v=11',
-  './js/state.js?v=11',
-  './js/modes.js?v=11',
-  './js/map.js?v=11',
-  './js/wheel.js?v=11',
-  './js/multiplayer.js?v=11',
-  './js/app.js?v=11'
+  './data/challenges.js?v=12',
+  './js/icons.js?v=12',
+  './js/state.js?v=12',
+  './js/modes.js?v=12',
+  './js/map.js?v=12',
+  './js/wheel.js?v=12',
+  './js/multiplayer.js?v=12',
+  './js/app.js?v=12'
 ];
 
 self.addEventListener('install', (event) => {

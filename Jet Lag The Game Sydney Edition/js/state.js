@@ -1,8 +1,9 @@
-import { DEFAULT_CHALLENGES, DEFAULT_CURSES, HIDE_SEEK_QUESTIONS, TRANSIT_RATES } from '../data/challenges.js?v=11';
-import { GAME_MODES, CTF_PRESETS, RACE_PRESETS, getDefaultRulesForMode } from './modes.js?v=11';
+import { DEFAULT_CHALLENGES, DEFAULT_CURSES, HIDE_SEEK_QUESTIONS, TRANSIT_RATES } from '../data/challenges.js?v=12';
+import { GAME_MODES, CTF_PRESETS, RACE_PRESETS, getDefaultRulesForMode } from './modes.js?v=12';
 
 const STORAGE_KEY = 'jetlag_sydney_state_v5';
 const TAB_PLAYER_KEY = 'jetlag_sydney_tab_player_id';
+const TAB_PROFILE_KEY = 'jetlag_sydney_tab_profile_v1';
 
 export function uid(prefix = 'id') {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -179,18 +180,22 @@ class Store {
         }
       };
       const tabId = getTabPlayerId();
-      const prevPlayer = parsed.players?.[parsed.localPlayerId] || base.players[base.localPlayerId];
+      let tabProf = null;
+      try {
+        const rawProf = sessionStorage.getItem(TAB_PROFILE_KEY);
+        if (rawProf) tabProf = JSON.parse(rawProf);
+      } catch {}
       merged.localPlayerId = tabId;
-      // Start each fresh browser session with its own unique player entry so multi-tab testing acts like distinct devices
+      // Each tab keeps its own session profile; brand-new tabs ALWAYS start as a regular Player (never inherit GM!)
       merged.players = {
         [tabId]: {
           ...base.players[base.localPlayerId],
-          name: prevPlayer?.name || 'Player 1',
-          nameLocked: Boolean(prevPlayer?.nameLocked),
-          accessLevel: prevPlayer?.isEventHost ? 'gm' : (prevPlayer?.accessLevel || 'player'),
-          teamId: prevPlayer?.isEventHost ? null : (prevPlayer?.teamId || 'team-a'),
-          isEventHost: Boolean(prevPlayer?.isEventHost),
-          color: prevPlayer?.color || '#F99D1C',
+          name: tabProf?.name || 'Player 1',
+          nameLocked: Boolean(tabProf?.nameLocked),
+          accessLevel: tabProf?.isEventHost ? 'gm' : (tabProf?.accessLevel || 'player'),
+          teamId: tabProf?.isEventHost ? null : (tabProf?.teamId || 'team-a'),
+          isEventHost: Boolean(tabProf?.isEventHost),
+          color: tabProf?.color || '#F99D1C',
           id: tabId,
           online: true,
           lastSeen: Date.now()
@@ -204,7 +209,22 @@ class Store {
 
   save() {
     try {
-      // Trim photo proofs if storage gets large
+      const me = this.state.players?.[this.state.localPlayerId];
+      if (me) {
+        sessionStorage.setItem(
+          TAB_PROFILE_KEY,
+          JSON.stringify({
+            name: me.name,
+            nameLocked: me.nameLocked,
+            accessLevel: me.accessLevel,
+            teamId: me.teamId,
+            isEventHost: me.isEventHost,
+            color: me.color
+          })
+        );
+      }
+    } catch {}
+    try {
       const copy = { ...this.state };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(copy));
     } catch {
