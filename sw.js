@@ -1,19 +1,19 @@
-const CACHE_NAME = 'jetlag-sydney-v7';
+const CACHE_NAME = 'jetlag-sydney-v9';
 const APP_SHELL = [
   './',
   './index.html',
   './manifest.json',
   './assets/icon.svg',
-  './css/styles.css',
+  './css/styles.css?v=9',
   './data/sydney-network.js',
-  './data/challenges.js',
-  './js/icons.js',
-  './js/state.js',
-  './js/modes.js',
-  './js/map.js',
-  './js/wheel.js',
-  './js/multiplayer.js',
-  './js/app.js'
+  './data/challenges.js?v=9',
+  './js/icons.js?v=9',
+  './js/state.js?v=9',
+  './js/modes.js?v=9',
+  './js/map.js?v=9',
+  './js/wheel.js?v=9',
+  './js/multiplayer.js?v=9',
+  './js/app.js?v=9'
 ];
 
 self.addEventListener('install', (event) => {
@@ -37,6 +37,9 @@ self.addEventListener('fetch', (event) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
 
+  // Never intercept localhost dev traffic
+  if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') return;
+
   // Cache map tiles opportunistically for Sydney tunnel resilience
   const isTile =
     url.hostname.includes('tile.openstreetmap.org') ||
@@ -59,10 +62,10 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Network-first for app assets so GitHub Pages updates appear immediately, fallback to cache in tunnels
+  // Strict network-first (bypassing HTTP cache) for app assets so GitHub Pages updates appear immediately, falling back to cache offline
   if (url.origin === self.location.origin) {
     event.respondWith(
-      fetch(req)
+      fetch(req, { cache: 'no-store' })
         .then((res) => {
           if (res && res.ok) {
             const copy = res.clone();
