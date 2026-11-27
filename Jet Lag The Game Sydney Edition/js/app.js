@@ -1,7 +1,7 @@
 // Jet Lag: Sydney Edition — Mobile-First Main Application Orchestrator
 import { SYDNEY_NETWORK } from '../data/sydney-network.js';
-import { CHALLENGE_CATEGORIES, POWERUPS_SHOP, TRANSIT_RATES, DEFAULT_CHALLENGES, DEFAULT_CURSES } from '../data/challenges.js?v=12';
-import { store, uid } from './state.js?v=12';
+import { CHALLENGE_CATEGORIES, POWERUPS_SHOP, TRANSIT_RATES, DEFAULT_CHALLENGES, DEFAULT_CURSES } from '../data/challenges.js?v=13';
+import { store, uid } from './state.js?v=13';
 import {
   GAME_MODES,
   RULE_MODULES,
@@ -14,11 +14,11 @@ import {
   formatClock,
   getDividingSide,
   getAccess
-} from './modes.js?v=12';
-import { SydneyMapController } from './map.js?v=12';
-import { ChallengeWheel } from './wheel.js?v=12';
-import { MultiplayerManager, generateRoomCode, normalizeRoomCode, compressImageFile } from './multiplayer.js?v=12';
-import { icon } from './icons.js?v=12';
+} from './modes.js?v=13';
+import { SydneyMapController } from './map.js?v=13';
+import { ChallengeWheel } from './wheel.js?v=13';
+import { MultiplayerManager, generateRoomCode, normalizeRoomCode, compressImageFile } from './multiplayer.js?v=13';
+import { icon } from './icons.js?v=13';
 
 function esc(str) {
   return String(str ?? '')
@@ -115,6 +115,7 @@ function downloadScheduleIcs(sched, inviteUrl) {
 class JetLagSydneyApp {
   constructor() {
     this.activeTab = 'game';
+    this.gameSubTab = 'play'; // 'play' | 'settings'
     this.wheelSubTab = 'spin'; // 'spin' | 'shop' | 'deck'
     this.deckKind = 'challenges'; // 'challenges' | 'curses'
     this.wheelMode = 'challenges'; // 'challenges' | 'curses'
@@ -141,7 +142,7 @@ class JetLagSydneyApp {
           caches.keys().then((keys) => keys.forEach((k) => caches.delete(k))).catch(() => {});
         }
       } else if (location.protocol === 'https:') {
-        navigator.serviceWorker.register('./sw.js?v=12').then((reg) => reg.update()).catch(() => {});
+        navigator.serviceWorker.register('./sw.js?v=13').then((reg) => reg.update()).catch(() => {});
       }
     }
 
@@ -739,8 +740,176 @@ class JetLagSydneyApp {
       ? computeRailRushStats(SYDNEY_NETWORK, s.claimedStations, s.teams, s.game.railRushLineBonus, s.game.stationPoints || 1)
       : null;
 
+    // Top-of-Game Segmented Switcher: Play | Rules & Settings
+    let html = `
+      <div class="seg-bar" style="grid-template-columns:repeat(2,1fr)">
+        <button class="seg-btn ${this.gameSubTab === 'play' ? 'active' : ''}" data-gsub="play">Play</button>
+        <button class="seg-btn ${this.gameSubTab === 'settings' ? 'active' : ''}" data-gsub="settings">${icon('sliders', 13)} Rules & Settings</button>
+      </div>
+    `;
+
+    // DEDICATED RULES & SETTINGS SUB-VIEW
+    if (this.gameSubTab === 'settings') {
+      const dis = access.canEditRules ? '' : 'disabled';
+      const perms = s.permissions || {};
+      const trMap = s.game.transitRates || {};
+      html += `
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">Game Mode</div>
+            <span class="tag-pill">${access.canEditRules ? 'EDITABLE' : 'LOCKED BY GM'}</span>
+          </div>
+          <div class="mode-grid">
+            ${Object.values(GAME_MODES)
+              .map(
+                (m) => `
+                <button class="mode-tile ${s.game.mode === m.id ? 'active' : ''}" data-pick-mode="${m.id}" style="--mcol:${m.color}" ${dis}>
+                  <div class="mode-tile-top">
+                    <span class="mode-tile-name">${esc(m.shortName)}</span>
+                    <span class="mode-badge">${m.badge}</span>
+                  </div>
+                  <div class="mode-tile-desc">${esc(m.tagline.slice(0, 68))}...</div>
+                </button>`
+              )
+              .join('')}
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">Economy & General Settings</div>
+            <span class="tag-pill">${access.canEditRules ? 'EDITABLE' : 'VIEW ONLY'}</span>
+          </div>
+          <div class="grid-2">
+            <div class="field">
+              <label>Starting Coins</label>
+              <input type="number" class="input" data-cfg-num="startingCoins" value="${s.game.startingCoins ?? 1500}" min="0" step="50" ${dis} />
+            </div>
+            <div class="field">
+              <label>Game Duration (mins)</label>
+              <input type="number" class="input" data-cfg-num="durationMins" value="${s.game.durationMins ?? 180}" min="10" step="10" ${dis} />
+            </div>
+          </div>
+          ${
+            access.canEditRules
+              ? `<button class="btn btn-primary btn-sm" id="btn-apply-start-coins">Apply ${s.game.startingCoins ?? 1500} Starting Coins to All Teams</button>`
+              : ''
+          }
+          <div class="field">
+            <label>Default Veto Penalty (mins)</label>
+            <input type="number" class="input" data-cfg-num="defaultVetoMins" value="${s.game.defaultVetoMins ?? 15}" min="1" max="120" ${dis} />
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title" style="color:var(--accent)">Rail Rush Settings</div>
+          <div class="grid-2">
+            <div class="field">
+              <label>Claim GPS Radius (m)</label>
+              <input type="number" class="input" data-cfg-num="stationClaimRadiusM" value="${s.game.stationClaimRadiusM ?? 100}" min="25" max="2000" step="25" ${dis} />
+            </div>
+            <div class="field">
+              <label>Points per Station</label>
+              <input type="number" class="input" data-cfg-num="stationPoints" value="${s.game.stationPoints ?? 1}" min="1" max="50" ${dis} />
+            </div>
+            <div class="field">
+              <label>Completed Line Bonus</label>
+              <input type="number" class="input" data-cfg-num="railRushLineBonus" value="${s.game.railRushLineBonus ?? 5}" min="0" max="100" ${dis} />
+            </div>
+            <div class="field">
+              <label>Target Score</label>
+              <input type="number" class="input" data-cfg-num="railRushTarget" value="${s.game.railRushTarget ?? 15}" min="1" max="500" ${dis} />
+            </div>
+          </div>
+          <label class="toggle-row" style="padding:4px 0">
+            <span style="font-size:12.5px;font-weight:600">Allow Stealing Claimed Stations</span>
+            <input type="checkbox" data-cfg-bool="allowStealingStations" ${s.game.allowStealingStations !== false ? 'checked' : ''} ${dis} />
+          </label>
+        </div>
+
+        <div class="card">
+          <div class="card-title" style="color:var(--accent-2)">Hide + Seek, Tag, CTF & Race</div>
+          <div class="grid-2">
+            <div class="field">
+              <label>Hiding Time (mins)</label>
+              <input type="number" class="input" data-cfg-num="hidingMins" value="${s.game.hidingMins ?? 45}" min="5" max="180" ${dis} />
+            </div>
+            <div class="field">
+              <label>Hiding Zone Radius (m)</label>
+              <input type="number" class="input" data-cfg-num="hidingRadiusM" value="${s.game.hidingRadiusM ?? 500}" min="100" max="5000" step="100" ${dis} />
+            </div>
+            <div class="field">
+              <label>Tag Catch Radius (m)</label>
+              <input type="number" class="input" data-cfg-num="catchRadiusM" value="${s.game.catchRadiusM ?? 100}" min="10" max="1000" step="10" ${dis} />
+            </div>
+            <div class="field">
+              <label>Flag / Checkpoint Radius (m)</label>
+              <input type="number" class="input" data-cfg-num="checkpointRadiusM" value="${s.game.checkpointRadiusM ?? 100}" min="25" max="2000" step="25" ${dis} />
+            </div>
+          </div>
+          <label class="toggle-row" style="padding:4px 0">
+            <span style="font-size:12.5px;font-weight:600">Require Ordered Race Checkpoints (#1, #2, #3)</span>
+            <input type="checkbox" data-cfg-bool="orderedCheckpoints" ${s.game.orderedCheckpoints ? 'checked' : ''} ${dis} />
+          </label>
+          <div class="field">
+            <label>Transit Coin Costs (coins / min)</label>
+            <div class="grid-2" style="gap:6px">
+              ${TRANSIT_RATES.map(
+                (tr) => `
+                <div class="row-between" style="background:var(--bg);padding:6px 9px;border-radius:8px;border:1px solid var(--border)">
+                  <span style="font-size:11px;font-weight:700">${tr.mode.replace('_', ' ').toUpperCase()}</span>
+                  <input type="number" data-transit-rate="${tr.mode}" value="${trMap[tr.mode] ?? tr.coinsPerMin}" min="0" step="5" style="width:64px;background:var(--bg-card);border:1px solid var(--border-strong);border-radius:6px;padding:3px 6px;font-size:12px;text-align:right" ${dis} />
+                </div>`
+              ).join('')}
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title" style="color:#c084fc">Access Levels & Anti-Cheat</div>
+          ${[
+            ['strictGpsProximity', 'Strict GPS Proximity Checks', 'Disable claiming stations/checkpoints unless physically within radius'],
+            ['lockNamesAfterJoin', 'Lock Player Names', 'Players cannot rename themselves after locking/joining'],
+            ['lockRulesToGm', 'Lock Rules & Clock to GM', 'Only Game Master or Permitted Co-Hosts can edit rules/mode/clock'],
+            ['lockScoresToGm', 'Lock Score & Coin Overrides', 'Prevent players from manually adding/removing coins or points'],
+            ['lockTeamsToGm', 'Lock Teams & Roles to GM', 'Prevent players from switching teams or roles mid-game'],
+            ['lockDeckToGm', 'Lock Challenge Deck to GM', 'Prevent players from editing or deleting challenges'],
+            ['allowDemoGps', 'Allow Demo GPS Pins', 'Enable only for indoor testing — keep OFF for real games']
+          ]
+            .map(
+              ([k, lbl, desc]) => `
+              <label class="toggle-row">
+                <div>
+                  <div style="font-size:12px;font-weight:700">${lbl}</div>
+                  <div class="muted" style="font-size:10.5px">${desc}</div>
+                </div>
+                <input type="checkbox" data-perm-toggle="${k}" ${perms[k] ? 'checked' : ''} ${access.isGm || !access.gmExists ? '' : 'disabled'} />
+              </label>`
+            )
+            .join('')}
+        </div>
+
+        <div class="card">
+          <div class="card-title">Enabled Mode Modules</div>
+          ${RULE_MODULES.map(
+            (rm) => `
+            <label class="toggle-row">
+              <div>
+                <div style="font-size:12px;font-weight:700">${esc(rm.label)}</div>
+                <div class="muted" style="font-size:10.5px">${esc(rm.desc)}</div>
+              </div>
+              <input type="checkbox" data-rule-toggle="${rm.key}" ${s.game.rules[rm.key] ? 'checked' : ''} ${dis} />
+            </label>`
+          ).join('')}
+        </div>
+      `;
+
+      pane.innerHTML = html;
+      this.bindGamePaneEvents(pane);
+      return;
+    }
+
     // 0. Event Host (Non-Playing Game Master) Console or Managed-Game Notice
-    let html = '';
     if (isHostGm) {
       html += `
         <div class="card host-card">
@@ -752,7 +921,7 @@ class JetLagSydneyApp {
             ${access.canStepDownGm ? `<button class="btn btn-xs btn-secondary" id="btn-gm-exit">Step Down</button>` : `<span class="tag-pill">${icon('lock', 11)} Locked In-Game</span>`}
           </div>
           <div class="muted" style="font-size:11.5px">
-            Full GM authority active — players cannot alter locked rules, scores, teams, names, or bypass GPS checks unless you grant permission in the Live tab.
+            Full GM authority active — customize starting coins, GPS radius, transit rates, and locks in <strong>Rules & Settings</strong> above.
           </div>
           <div class="row" style="gap:6px">
             <input type="text" id="gm-broadcast-input" class="input" placeholder="Send live announcement to all players..." style="flex:1;padding:7px 10px;font-size:13px" />
@@ -800,7 +969,7 @@ class JetLagSydneyApp {
           </div>
           <div class="row" style="gap:5px">
             ${access.canEditRules ? `<button class="btn btn-xs btn-secondary" id="btn-toggle-modes">${this.showModePicker ? 'Done' : 'Change'}</button>` : ''}
-            <button class="btn btn-xs ${this.showRulesConfig ? 'btn-primary' : 'btn-ghost'}" id="btn-toggle-rules" title="Game Rules & Parameters">${icon('sliders', 13)} Rules</button>
+            <button class="btn btn-xs btn-secondary" id="btn-toggle-rules" title="Game Rules & Parameters">${icon('sliders', 12)} Settings</button>
             ${access.canEditRules ? `<button class="btn btn-xs btn-danger" id="btn-reset-game">Reset</button>` : ''}
           </div>
         </div>
@@ -839,143 +1008,6 @@ class JetLagSydneyApp {
         }
       </div>
     `;
-
-    if (this.showRulesConfig || (s.game.mode === 'custom' && access.canEditRules)) {
-      const dis = access.canEditRules ? '' : 'disabled';
-      const perms = s.permissions || {};
-      const trMap = s.game.transitRates || {};
-      html += `
-        <div class="card">
-          <div class="card-header">
-            <div class="card-title">Custom Rules & Parameters</div>
-            <span class="tag-pill">${access.canEditRules ? 'EDITABLE' : 'VIEW ONLY'}</span>
-          </div>
-
-          <!-- Universal Economy & Clock -->
-          <div class="grid-2">
-            <div class="field">
-              <label>Starting Coins</label>
-              <input type="number" class="input" data-cfg-num="startingCoins" value="${s.game.startingCoins ?? 1500}" min="0" step="50" ${dis} />
-            </div>
-            <div class="field">
-              <label>Game Duration (mins)</label>
-              <input type="number" class="input" data-cfg-num="durationMins" value="${s.game.durationMins ?? 180}" min="10" step="10" ${dis} />
-            </div>
-          </div>
-          ${
-            access.canEditRules
-              ? `<button class="btn btn-secondary btn-xs" id="btn-apply-start-coins">Apply ${s.game.startingCoins ?? 1500} Starting Coins to All Teams</button>`
-              : ''
-          }
-
-          <!-- Rail Rush Parameters -->
-          <div style="border-top:1px solid var(--border);padding-top:8px;display:flex;flex-direction:column;gap:7px">
-            <strong style="font-size:12px;color:var(--accent)">Rail Rush Rules</strong>
-            <div class="grid-2">
-              <div class="field">
-                <label>Claim GPS Radius (m)</label>
-                <input type="number" class="input" data-cfg-num="stationClaimRadiusM" value="${s.game.stationClaimRadiusM ?? 100}" min="25" max="2000" step="25" ${dis} />
-              </div>
-              <div class="field">
-                <label>Points per Station</label>
-                <input type="number" class="input" data-cfg-num="stationPoints" value="${s.game.stationPoints ?? 1}" min="1" max="50" ${dis} />
-              </div>
-              <div class="field">
-                <label>Completed Line Bonus</label>
-                <input type="number" class="input" data-cfg-num="railRushLineBonus" value="${s.game.railRushLineBonus ?? 5}" min="0" max="100" ${dis} />
-              </div>
-              <div class="field">
-                <label>Default Veto (mins)</label>
-                <input type="number" class="input" data-cfg-num="defaultVetoMins" value="${s.game.defaultVetoMins ?? 15}" min="1" max="120" ${dis} />
-              </div>
-            </div>
-            <label class="toggle-row" style="padding:4px 0">
-              <span style="font-size:12px;font-weight:600">Allow Stealing Already-Claimed Stations</span>
-              <input type="checkbox" data-cfg-bool="allowStealingStations" ${s.game.allowStealingStations !== false ? 'checked' : ''} ${dis} />
-            </label>
-          </div>
-
-          <!-- Hide + Seek & Tag Parameters -->
-          <div style="border-top:1px solid var(--border);padding-top:8px;display:flex;flex-direction:column;gap:7px">
-            <strong style="font-size:12px;color:var(--accent-2)">Hide + Seek & Tag Rules</strong>
-            <div class="grid-2">
-              <div class="field">
-                <label>Hiding Time (mins)</label>
-                <input type="number" class="input" data-cfg-num="hidingMins" value="${s.game.hidingMins ?? 45}" min="5" max="180" ${dis} />
-              </div>
-              <div class="field">
-                <label>Hiding Zone Radius (m)</label>
-                <input type="number" class="input" data-cfg-num="hidingRadiusM" value="${s.game.hidingRadiusM ?? 500}" min="100" max="5000" step="100" ${dis} />
-              </div>
-              <div class="field">
-                <label>Tag Catch Radius (m)</label>
-                <input type="number" class="input" data-cfg-num="catchRadiusM" value="${s.game.catchRadiusM ?? 100}" min="10" max="1000" step="10" ${dis} />
-              </div>
-              <div class="field">
-                <label>Flag / Checkpoint Radius (m)</label>
-                <input type="number" class="input" data-cfg-num="checkpointRadiusM" value="${s.game.checkpointRadiusM ?? 100}" min="25" max="2000" step="25" ${dis} />
-              </div>
-            </div>
-            <label class="toggle-row" style="padding:4px 0">
-              <span style="font-size:12px;font-weight:600">Require Ordered Race Checkpoints (#1, #2, #3)</span>
-              <input type="checkbox" data-cfg-bool="orderedCheckpoints" ${s.game.orderedCheckpoints ? 'checked' : ''} ${dis} />
-            </label>
-            <div class="field">
-              <label>Transit Coin Costs (per min)</label>
-              <div class="grid-2" style="gap:6px">
-                ${TRANSIT_RATES.map(
-                  (tr) => `
-                  <div class="row-between" style="background:var(--bg);padding:5px 8px;border-radius:8px;border:1px solid var(--border)">
-                    <span style="font-size:11px;font-weight:700">${tr.mode.replace('_', ' ').toUpperCase()}</span>
-                    <input type="number" data-transit-rate="${tr.mode}" value="${trMap[tr.mode] ?? tr.coinsPerMin}" min="0" step="5" style="width:62px;background:var(--bg-card);border:1px solid var(--border-strong);border-radius:6px;padding:3px 6px;font-size:12px;text-align:right" ${dis} />
-                  </div>`
-                ).join('')}
-              </div>
-            </div>
-          </div>
-
-          <!-- Access Control & Anti-Cheat (GM Authority) -->
-          <div style="border-top:1px solid var(--border);padding-top:8px;display:flex;flex-direction:column;gap:4px">
-            <strong style="font-size:12px;color:#c084fc">Access Levels & Anti-Cheat</strong>
-            ${[
-              ['strictGpsProximity', 'Strict GPS Proximity Checks', 'Disable claiming stations/checkpoints unless physically within radius'],
-              ['lockNamesAfterJoin', 'Lock Player Names', 'Players cannot rename themselves after locking/joining'],
-              ['lockRulesToGm', 'Lock Rules & Clock to GM', 'Only Game Master or Permitted Co-Hosts can edit rules/mode/clock'],
-              ['lockScoresToGm', 'Lock Score & Coin Overrides', 'Prevent players from manually adding/removing coins or points'],
-              ['lockTeamsToGm', 'Lock Teams & Roles to GM', 'Prevent players from switching teams or roles mid-game'],
-              ['lockDeckToGm', 'Lock Challenge Deck to GM', 'Prevent players from editing or deleting challenges'],
-              ['allowDemoGps', 'Allow Demo GPS Pins', 'Enable only for indoor testing — keep OFF for real games']
-            ]
-              .map(
-                ([k, lbl, desc]) => `
-                <label class="toggle-row">
-                  <div>
-                    <div style="font-size:12px;font-weight:700">${lbl}</div>
-                    <div class="muted" style="font-size:10.5px">${desc}</div>
-                  </div>
-                  <input type="checkbox" data-perm-toggle="${k}" ${perms[k] ? 'checked' : ''} ${access.isGm || !access.gmExists ? '' : 'disabled'} />
-                </label>`
-              )
-              .join('')}
-          </div>
-
-          <!-- Modular Feature Toggles -->
-          <div style="border-top:1px solid var(--border);padding-top:8px">
-            <strong style="font-size:12px;color:var(--text-muted)">Enabled Mode Modules</strong>
-            ${RULE_MODULES.map(
-              (rm) => `
-              <label class="toggle-row">
-                <div>
-                  <div style="font-size:12px;font-weight:700">${esc(rm.label)}</div>
-                  <div class="muted" style="font-size:10.5px">${esc(rm.desc)}</div>
-                </div>
-                <input type="checkbox" data-rule-toggle="${rm.key}" ${s.game.rules[rm.key] ? 'checked' : ''} ${dis} />
-              </label>`
-            ).join('')}
-          </div>
-        </div>
-      `;
-    }
 
     // 2. ACTIVE MODE HQ RIGHT UP TOP (Most used controls during live play!)
     if (s.game.rules.hideSeekQA) {
@@ -1342,6 +1374,13 @@ class JetLagSydneyApp {
   }
 
   bindGamePaneEvents(pane) {
+    pane.querySelectorAll('[data-gsub]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.gameSubTab = btn.dataset.gsub;
+        this.renderGamePane();
+      });
+    });
+
     pane.querySelector('#btn-game-open-sched')?.addEventListener('click', () => this.switchTab('live'));
     pane.querySelector('#btn-gm-enter')?.addEventListener('click', () => this.setEventHostMode(true));
     pane.querySelector('#btn-gm-exit')?.addEventListener('click', () => this.setEventHostMode(false));
@@ -1380,7 +1419,7 @@ class JetLagSydneyApp {
     });
 
     pane.querySelector('#btn-toggle-rules')?.addEventListener('click', () => {
-      this.showRulesConfig = !this.showRulesConfig;
+      this.gameSubTab = 'settings';
       this.renderGamePane();
     });
 

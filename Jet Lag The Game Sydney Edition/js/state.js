@@ -1,5 +1,5 @@
-import { DEFAULT_CHALLENGES, DEFAULT_CURSES, HIDE_SEEK_QUESTIONS, TRANSIT_RATES } from '../data/challenges.js?v=12';
-import { GAME_MODES, CTF_PRESETS, RACE_PRESETS, getDefaultRulesForMode } from './modes.js?v=12';
+import { DEFAULT_CHALLENGES, DEFAULT_CURSES, HIDE_SEEK_QUESTIONS, TRANSIT_RATES } from '../data/challenges.js?v=13';
+import { GAME_MODES, CTF_PRESETS, RACE_PRESETS, getDefaultRulesForMode } from './modes.js?v=13';
 
 const STORAGE_KEY = 'jetlag_sydney_state_v5';
 const TAB_PLAYER_KEY = 'jetlag_sydney_tab_player_id';

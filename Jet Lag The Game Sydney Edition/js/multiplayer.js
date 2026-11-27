@@ -1,7 +1,7 @@
 // Reliable Real-Time Multiplayer Sync:
 // Engine 1: Zero-Setup Cloud WSS Relay (MQTT over Secure WebSockets w/ Retained Room State + Failover + BroadcastChannel)
 // Engine 2: Optional Private Firebase Realtime Database (REST + SSE)
-import { store } from './state.js?v=12';
+import { store } from './state.js?v=13';
 
 const MQTT_BROKERS = [
   { name: 'EMQX Cloud', url: 'wss://broker.emqx.io:8084/mqtt' },
