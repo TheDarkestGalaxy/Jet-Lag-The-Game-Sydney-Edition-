@@ -1,6 +1,6 @@
 // Tactile HTML5 Canvas Challenge & Curse Randomizer Wheel with Physics & Synth Audio
-import { CHALLENGE_CATEGORIES } from '../data/challenges.js?v=13';
-import { store } from './state.js?v=13';
+import { CHALLENGE_CATEGORIES } from '../data/challenges.js?v=14';
+import { store } from './state.js?v=14';
 
 const SLICE_PALETTE = [
   '#F99D1C', '#0098CD', '#168388', '#D11F2F',

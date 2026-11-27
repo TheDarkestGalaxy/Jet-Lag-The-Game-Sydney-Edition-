@@ -1,7 +1,7 @@
 // Jet Lag: Sydney Edition — Mobile-First Main Application Orchestrator
 import { SYDNEY_NETWORK } from '../data/sydney-network.js';
-import { CHALLENGE_CATEGORIES, POWERUPS_SHOP, TRANSIT_RATES, DEFAULT_CHALLENGES, DEFAULT_CURSES } from '../data/challenges.js?v=13';
-import { store, uid } from './state.js?v=13';
+import { CHALLENGE_CATEGORIES, POWERUPS_SHOP, TRANSIT_RATES, DEFAULT_CHALLENGES, DEFAULT_CURSES } from '../data/challenges.js?v=14';
+import { store, uid } from './state.js?v=14';
 import {
   GAME_MODES,
   RULE_MODULES,
@@ -14,11 +14,11 @@ import {
   formatClock,
   getDividingSide,
   getAccess
-} from './modes.js?v=13';
-import { SydneyMapController } from './map.js?v=13';
-import { ChallengeWheel } from './wheel.js?v=13';
-import { MultiplayerManager, generateRoomCode, normalizeRoomCode, compressImageFile } from './multiplayer.js?v=13';
-import { icon } from './icons.js?v=13';
+} from './modes.js?v=14';
+import { SydneyMapController } from './map.js?v=14';
+import { ChallengeWheel } from './wheel.js?v=14';
+import { MultiplayerManager, generateRoomCode, normalizeRoomCode, compressImageFile } from './multiplayer.js?v=14';
+import { icon } from './icons.js?v=14';
 
 function esc(str) {
   return String(str ?? '')
@@ -134,16 +134,9 @@ class JetLagSydneyApp {
   }
 
   init() {
+    // Keep Service Worker unregistered during active development so GitHub Pages updates always appear immediately
     if ('serviceWorker' in navigator) {
-      if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
-        // Avoid stale local-dev caches; unregister any older SW on localhost
-        navigator.serviceWorker.getRegistrations().then((regs) => regs.forEach((r) => r.unregister())).catch(() => {});
-        if ('caches' in window) {
-          caches.keys().then((keys) => keys.forEach((k) => caches.delete(k))).catch(() => {});
-        }
-      } else if (location.protocol === 'https:') {
-        navigator.serviceWorker.register('./sw.js?v=13').then((reg) => reg.update()).catch(() => {});
-      }
+      navigator.serviceWorker.getRegistrations().then((regs) => regs.forEach((r) => r.unregister())).catch(() => {});
     }
 
     this.applyTheme(store.get().theme);
@@ -2951,7 +2944,10 @@ class JetLagSydneyApp {
       </div>
 
       <div class="card">
-        <div class="card-title">Preferences & Backup</div>
+        <div class="card-header">
+          <div class="card-title">Preferences & Backup</div>
+          <span class="tag-pill mono">v14</span>
+        </div>
         <label class="toggle-row">
           <span style="font-size:13px;font-weight:600">Wheel Sound Effects</span>
           <input type="checkbox" id="cb-sound-pref" ${s.soundEnabled ? 'checked' : ''} />

@@ -22,7 +22,22 @@
   <script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js" crossorigin=""></script>
   <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js" crossorigin=""></script>
 
-  <link rel="stylesheet" href="./css/styles.css?v=13" />
+  <link rel="stylesheet" href="./css/styles.css?v=14" />
+  <script>
+    // Clear any older Service Worker caches immediately so updates always show up right away
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function (regs) {
+        regs.forEach(function (r) { r.unregister(); });
+      }).catch(function () {});
+    }
+    if ('caches' in window) {
+      caches.keys().then(function (keys) {
+        keys.forEach(function (k) {
+          if (k.indexOf('jetlag-sydney') === 0) caches.delete(k);
+        });
+      }).catch(function () {});
+    }
+  </script>
 </head>
 <body>
   <!-- SLIM TOP BAR -->
@@ -292,6 +307,6 @@
   <!-- TOAST NOTIFICATIONS -->
   <div class="toast-stack" id="toast-stack"></div>
 
-  <script type="module" src="./js/app.js?v=13"></script>
+  <script type="module" src="./js/app.js?v=14"></script>
 </body>
 </html>
