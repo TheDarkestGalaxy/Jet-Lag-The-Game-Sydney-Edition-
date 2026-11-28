@@ -357,6 +357,36 @@ export function canSeePlayerGps(state, viewerPlayer, targetPlayer) {
   return true;
 }
 
+/** Check GPS proximity with freshness check & optional urban accuracy buffer */
+export function evaluateGpsProximity(state, player, targetLat, targetLng, limitM) {
+  const access = getAccess(state);
+  if (!access.mustVerifyGps) {
+    return { allowed: true, reason: '', distanceM: null };
+  }
+  if (!player || player.lat == null || player.lng == null) {
+    return { allowed: false, reason: `Live GPS fix required (must be within ${limitM}m).`, distanceM: null };
+  }
+  const maxAgeSec = Math.max(15, Number(state.game?.maxGpsAgeSec) || 90);
+  const ageSec = Math.round((Date.now() - (player.lastSeen || 0)) / 1000);
+  if (ageSec > maxAgeSec) {
+    return { allowed: false, reason: `GPS fix is stale (${ageSec}s old). Tap Refresh GPS for a live fix.`, distanceM: null };
+  }
+  const distM = haversineM(player.lat, player.lng, targetLat, targetLng);
+  const accBuffer = Math.min(
+    Math.max(0, Number(state.game?.gpsAccuracyBufferM) || 0),
+    Math.max(0, Math.round((player.accuracy || 0) * 0.5))
+  );
+  const effectiveLimit = limitM + accBuffer;
+  if (distM > effectiveLimit) {
+    return {
+      allowed: false,
+      reason: `Too far (${formatDistance(distM)} away — limit is ${limitM}m${accBuffer > 0 ? ` +${accBuffer}m GPS buffer` : ''}).`,
+      distanceM: distM
+    };
+  }
+  return { allowed: true, reason: '', distanceM: distM };
+}
+
 /** Format milliseconds as HH:MM:SS or MM:SS */
 export function formatClock(ms) {
   const clamped = Math.max(0, Math.floor(ms / 1000));

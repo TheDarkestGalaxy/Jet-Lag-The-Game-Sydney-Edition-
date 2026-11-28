@@ -1,7 +1,7 @@
 // Jet Lag: Sydney Edition — Mobile-First Main Application Orchestrator
 import { SYDNEY_NETWORK } from '../data/sydney-network.js';
-import { CHALLENGE_CATEGORIES, POWERUPS_SHOP, TRANSIT_RATES, DEFAULT_CHALLENGES, DEFAULT_CURSES } from '../data/challenges.js?v=14';
-import { store, uid } from './state.js?v=14';
+import { CHALLENGE_CATEGORIES, POWERUPS_SHOP, TRANSIT_RATES, DEFAULT_CHALLENGES, DEFAULT_CURSES } from '../data/challenges.js?v=15';
+import { store, uid } from './state.js?v=15';
 import {
   GAME_MODES,
   RULE_MODULES,
@@ -13,12 +13,14 @@ import {
   formatDistance,
   formatClock,
   getDividingSide,
-  getAccess
-} from './modes.js?v=14';
-import { SydneyMapController } from './map.js?v=14';
-import { ChallengeWheel } from './wheel.js?v=14';
-import { MultiplayerManager, generateRoomCode, normalizeRoomCode, compressImageFile } from './multiplayer.js?v=14';
-import { icon } from './icons.js?v=14';
+  getAccess,
+  evaluateGpsProximity
+} from './modes.js?v=15';
+import { SydneyMapController } from './map.js?v=15';
+import { ChallengeWheel } from './wheel.js?v=15';
+import { MultiplayerManager, generateRoomCode, normalizeRoomCode, compressImageFile, ensureQrLib } from './multiplayer.js?v=15';
+import { icon } from './icons.js?v=15';
+import { showConfirmModal, showPromptModal, showCopyModal, showEditTeamModal, ACCENT_THEMES } from './modals.js?v=15';
 
 function esc(str) {
   return String(str ?? '')
@@ -127,6 +129,8 @@ class JetLagSydneyApp {
     this.showRulesConfig = false;
     this.pendingPhotoDataUrl = null;
     this.qaCategoryFilter = 'Radar';
+    this.dirtyTabs = new Set(['game', 'wheel', 'feed', 'live']);
+    this.lastNearestStationId = null;
 
     this.mapCtrl = null;
     this.wheel = null;
@@ -140,6 +144,7 @@ class JetLagSydneyApp {
     }
 
     this.applyTheme(store.get().theme);
+    this.applyAccentTheme(store.get().accentTheme || 'gold');
 
     const metaEl = document.getElementById('network-meta-sub');
     if (metaEl) {
@@ -149,7 +154,9 @@ class JetLagSydneyApp {
     this.mp = new MultiplayerManager({
       onToast: (msg) => this.toast(msg),
       onGpsUpdate: () => {
-        if (this.activeTab === 'live' || this.activeTab === 'game') this.renderDynamicPanes();
+        this.updateGpsHudPill();
+        if (this.activeTab === 'live') this.renderLivePane();
+        else if (this.activeTab === 'game') this.renderGamePane();
       }
     });
 
@@ -170,7 +177,22 @@ class JetLagSydneyApp {
       onCheckCheckpoint: (cpId) => this.toggleCheckpointDone(cpId),
       onQuickRadar: (lat, lng, label) => this.openRadarModal(lat, lng, label),
       onRequestThermometer: (pA, pB) => this.openThermometerModal(pA, pB),
-      onRequestPin: (lat, lng) => this.openPinModal(lat, lng)
+      onRequestPin: (lat, lng) => this.openPinModal(lat, lng),
+      onCustomBorderDrawn: (p1, p2) => {
+        store.mutate((st) => {
+          st.dividingLine = {
+            ...st.dividingLine,
+            id: 'custom',
+            name: 'Custom Drawn Border',
+            p1,
+            p2,
+            enabled: true
+          };
+          st.game.rules.dividingLine = true;
+        }, 'dividing_line');
+        store.addFeed({ type: 'system', text: 'drew a custom Capture the Flag dividing border on the map.' });
+        this.toast('Custom CTF dividing border set!');
+      }
     });
     this.mapCtrl.init();
 
@@ -192,22 +214,47 @@ class JetLagSydneyApp {
     this.renderLayerLineExplorer();
     this.renderAll();
 
+    // Lazy active-tab rendering: only rebuild the currently visible tab DOM on state changes!
     store.subscribe((state, reason) => {
       this.renderTopbar(state);
-      // Avoid wiping an input the user is actively typing in during background remote/GPS syncs
+      this.updateGpsHudPill();
+      if (reason === 'accent') {
+        this.applyAccentTheme(state.accentTheme || 'gold');
+      }
+
       const activeEl = document.activeElement;
       const typingInFeed = activeEl && activeEl.closest?.('#pane-feed') && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA');
       const typingInLive = activeEl && activeEl.closest?.('#pane-live') && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA');
       const typingInDeck = activeEl && activeEl.closest?.('#wsub-deck') && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA');
+      const typingInGame = activeEl && activeEl.closest?.('#pane-game') && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA');
 
       if (reason === 'gps') {
-        if (this.activeTab === 'live' && !typingInLive) this.renderLivePane();
+        this.dirtyTabs.add('live');
+        if (this.activeTab === 'live' && !typingInLive) {
+          this.renderLivePane();
+          this.dirtyTabs.delete('live');
+        }
         return;
       }
-      this.renderGamePane();
-      if (!typingInDeck) this.renderWheelSideSections();
-      if (!typingInFeed) this.renderFeedPane();
-      if (!typingInLive || reason === 'room_status') this.renderLivePane();
+
+      this.dirtyTabs.add('game');
+      this.dirtyTabs.add('wheel');
+      this.dirtyTabs.add('feed');
+      this.dirtyTabs.add('live');
+
+      if (this.activeTab === 'game' && !typingInGame) {
+        this.renderGamePane();
+        this.dirtyTabs.delete('game');
+      } else if (this.activeTab === 'wheel' && !typingInDeck) {
+        this.renderWheelSideSections();
+        this.dirtyTabs.delete('wheel');
+      } else if (this.activeTab === 'feed' && !typingInFeed) {
+        this.renderFeedPane();
+        this.dirtyTabs.delete('feed');
+      } else if (this.activeTab === 'live' && (!typingInLive || reason === 'room_status')) {
+        this.renderLivePane();
+        this.dirtyTabs.delete('live');
+      }
     });
 
     setInterval(() => this.tickTimers(), 1000);
@@ -415,11 +462,17 @@ class JetLagSydneyApp {
     });
     document.getElementById('btn-clear-ann').addEventListener('click', () => {
       if (!store.get().annotations.length) return;
-      if (confirm('Clear all strategy overlays (radars, thermometers, zones, pins)?')) {
-        store.mutate((s) => { s.annotations = []; }, 'annotation');
-        this.closePopovers();
-        this.toast('Cleared all map overlays.');
-      }
+      showConfirmModal({
+        title: 'Clear Map Overlays?',
+        message: 'Remove all strategy overlays (radars, thermometers, shaded zones, and pins) from the map?',
+        confirmLabel: 'Clear Overlays',
+        danger: true,
+        onConfirm: () => {
+          store.mutate((s) => { s.annotations = []; }, 'annotation');
+          this.closePopovers();
+          this.toast('Cleared all map overlays.');
+        }
+      });
     });
 
     document.getElementById('btn-tool-cancel').addEventListener('click', () => this.selectMapTool('select'));
@@ -456,6 +509,18 @@ class JetLagSydneyApp {
       this.mapCtrl.setShowLabels(next);
       e.currentTarget.classList.toggle('btn-primary', next);
       e.currentTarget.classList.toggle('btn-secondary', !next);
+    });
+    document.getElementById('btn-toggle-trail')?.addEventListener('click', (e) => {
+      const next = !store.get().showGpsTrail;
+      store.mutate((s) => { s.showGpsTrail = next; }, 'trail', false);
+      e.currentTarget.classList.toggle('btn-primary', next);
+      e.currentTarget.classList.toggle('btn-secondary', !next);
+      this.toast(next ? 'GPS breadcrumb trail enabled.' : 'GPS breadcrumb trail hidden.');
+    });
+    document.getElementById('gps-hud-pill')?.addEventListener('click', () => {
+      if (this.lastNearestStationId) {
+        this.mapCtrl.flyToStation(this.lastNearestStationId);
+      }
     });
     document.getElementById('basemap-select').addEventListener('change', (e) => {
       this.mapCtrl.setBasemap(e.target.value);
@@ -569,6 +634,42 @@ class JetLagSydneyApp {
     if (btn) btn.innerHTML = icon(theme === 'light' ? 'moon' : 'sun', 15);
   }
 
+  applyAccentTheme(accentId) {
+    const preset = ACCENT_THEMES.find((a) => a.id === accentId) || ACCENT_THEMES[0];
+    document.documentElement.style.setProperty('--accent', preset.color);
+    document.documentElement.style.setProperty('--accent-2', preset.secondary);
+    if (this.wheel) this.wheel.draw();
+  }
+
+  updateGpsHudPill() {
+    const pill = document.getElementById('gps-hud-pill');
+    if (!pill || !this.mapCtrl) return;
+    const s = store.get();
+    const me = store.getLocalPlayer();
+    if (!me || me.lat == null || me.lng == null || me.isEventHost) {
+      pill.style.display = 'none';
+      return;
+    }
+    const nearest = this.mapCtrl.findNearestStation(me.lat, me.lng);
+    this.lastNearestStationId = nearest?.station?.id || null;
+    const tel = s.gpsTelemetry || {};
+    const pb = s.game?.playBoundary;
+    let outOfBounds = false;
+    if (pb?.enabled && pb.center && pb.radiusKm > 0) {
+      const distFromCenter = haversineM(me.lat, me.lng, pb.center[0], pb.center[1]);
+      outOfBounds = distFromCenter > pb.radiusKm * 1000;
+    }
+
+    pill.className = `gps-hud-pill ${outOfBounds ? 'oob' : tel.status === 'weak' || tel.status === 'stale' ? tel.status : ''}`;
+    const parts = [];
+    if (outOfBounds) parts.push('OUT OF BOUNDS');
+    if (nearest) parts.push(`${esc(nearest.station.name)} (${formatDistance(nearest.distanceM)})`);
+    if (tel.speedKmh != null && tel.speedKmh >= 3) parts.push(`${tel.speedKmh} km/h`);
+    if (tel.accuracy != null) parts.push(`±${tel.accuracy}m`);
+    pill.innerHTML = `<span class="gps-dot"></span><span>${parts.join(' <span class="gps-sep">·</span> ')}</span>`;
+    pill.style.display = 'inline-flex';
+  }
+
   openTabOnMobileOrDesktop(tabName) {
     this.switchTab(tabName);
     if (window.innerWidth <= 920) {
@@ -587,7 +688,15 @@ class JetLagSydneyApp {
     if (tabName === 'wheel' && this.wheelSubTab === 'spin') {
       setTimeout(() => this.wheel.draw(), 60);
     }
-    this.renderDynamicPanes();
+    this.renderTab(tabName);
+  }
+
+  renderTab(tabName) {
+    if (tabName === 'game') this.renderGamePane();
+    else if (tabName === 'wheel') this.renderWheelSideSections();
+    else if (tabName === 'feed') this.renderFeedPane();
+    else if (tabName === 'live') this.renderLivePane();
+    this.dirtyTabs.delete(tabName);
   }
 
   selectMapTool(tool) {
@@ -621,16 +730,19 @@ class JetLagSydneyApp {
   renderAll() {
     const s = store.get();
     this.renderTopbar(s);
-    this.renderDynamicPanes();
+    this.updateGpsHudPill();
+    this.renderTab(this.activeTab);
     this.renderWheelFilters();
     this.renderWheelLanded();
+    const trailBtn = document.getElementById('btn-toggle-trail');
+    if (trailBtn) {
+      trailBtn.classList.toggle('btn-primary', Boolean(s.showGpsTrail));
+      trailBtn.classList.toggle('btn-secondary', !s.showGpsTrail);
+    }
   }
 
   renderDynamicPanes() {
-    this.renderGamePane();
-    this.renderWheelSideSections();
-    this.renderFeedPane();
-    this.renderLivePane();
+    this.renderTab(this.activeTab);
   }
 
   renderTopbar(state) {
@@ -746,11 +858,25 @@ class JetLagSydneyApp {
       const dis = access.canEditRules ? '' : 'disabled';
       const perms = s.permissions || {};
       const trMap = s.game.transitRates || {};
+      const pwCfg = s.game.powerupConfig || {};
+      const pb = s.game.playBoundary || { enabled: false, center: [-33.88488, 151.20665], centerName: 'Central', radiusKm: 25 };
+      const BOUNDARY_HUBS = [
+        ['Central', -33.88488, 151.20665],
+        ['Circular Quay', -33.86133, 151.21046],
+        ['Strathfield', -33.87158, 151.09427],
+        ['Parramatta', -33.81744, 151.00493],
+        ['Chatswood', -33.79749, 151.18111],
+        ['Hornsby', -33.70316, 151.09835],
+        ['Hurstville', -33.96751, 151.10261]
+      ];
       html += `
         <div class="card">
           <div class="card-header">
-            <div class="card-title">Game Mode</div>
-            <span class="tag-pill">${access.canEditRules ? 'EDITABLE' : 'LOCKED BY GM'}</span>
+            <div class="card-title">Game Mode & Presets</div>
+            <div class="row" style="gap:4px">
+              <button class="btn btn-xs btn-secondary" id="btn-export-rules">Export Rules</button>
+              ${access.canEditRules ? `<button class="btn btn-xs btn-secondary" id="btn-import-rules">Import Rules</button>` : ''}
+            </div>
           </div>
           <div class="mode-grid">
             ${Object.values(GAME_MODES)
@@ -770,7 +896,43 @@ class JetLagSydneyApp {
 
         <div class="card">
           <div class="card-header">
-            <div class="card-title">Economy & General Settings</div>
+            <div class="card-title">TfNSW Accent Theme</div>
+            <span class="tag-pill">VISUAL</span>
+          </div>
+          <div class="accent-swatch-row">
+            ${ACCENT_THEMES.map(
+              (at) => `
+              <button type="button" class="accent-chip ${(s.accentTheme || 'gold') === at.id ? 'active' : ''}" data-accent-theme="${at.id}">
+                <span class="dot" style="background:${at.color}"></span>
+                <span>${esc(at.name)}</span>
+              </button>`
+            ).join('')}
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">Play Area Boundary</div>
+            <input type="checkbox" id="cb-pb-enabled" ${pb.enabled ? 'checked' : ''} ${dis} />
+          </div>
+          <div class="muted" style="font-size:11.5px">Dim out-of-bounds areas on the map and alert players if their GPS leaves the play radius.</div>
+          <div class="grid-2">
+            <div class="field">
+              <label>Center Hub</label>
+              <select id="sel-pb-hub" class="select" ${dis}>
+                ${BOUNDARY_HUBS.map(([nm]) => `<option value="${nm}" ${pb.centerName === nm ? 'selected' : ''}>${nm}</option>`).join('')}
+              </select>
+            </div>
+            <div class="field">
+              <label>Play Radius (km)</label>
+              <input type="number" id="inp-pb-radius" class="input" value="${pb.radiusKm ?? 25}" min="1" max="200" step="1" ${dis} />
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">Economy, Wheel & General Settings</div>
             <span class="tag-pill">${access.canEditRules ? 'EDITABLE' : 'VIEW ONLY'}</span>
           </div>
           <div class="grid-2">
@@ -782,24 +944,44 @@ class JetLagSydneyApp {
               <label>Game Duration (mins)</label>
               <input type="number" class="input" data-cfg-num="durationMins" value="${s.game.durationMins ?? 180}" min="10" step="10" ${dis} />
             </div>
+            <div class="field">
+              <label>Default Veto (mins)</label>
+              <input type="number" class="input" data-cfg-num="defaultVetoMins" value="${s.game.defaultVetoMins ?? 15}" min="1" max="120" ${dis} />
+            </div>
+            <div class="field">
+              <label>Challenge Coin Mult</label>
+              <input type="number" class="input" data-cfg-float="challengeCoinMultiplier" value="${s.game.challengeCoinMultiplier ?? 1}" min="0.25" max="5" step="0.25" ${dis} />
+            </div>
+            <div class="field">
+              <label>Veto Time Multiplier</label>
+              <input type="number" class="input" data-cfg-float="vetoMultiplier" value="${s.game.vetoMultiplier ?? 1}" min="0.25" max="3" step="0.25" ${dis} />
+            </div>
           </div>
+          <label class="toggle-row" style="padding:4px 0">
+            <span style="font-size:12.5px;font-weight:600">Remove Completed Challenges from Wheel</span>
+            <input type="checkbox" data-cfg-bool="removeCompletedChallenges" ${s.game.removeCompletedChallenges ? 'checked' : ''} ${dis} />
+          </label>
           ${
             access.canEditRules
               ? `<button class="btn btn-primary btn-sm" id="btn-apply-start-coins">Apply ${s.game.startingCoins ?? 1500} Starting Coins to All Teams</button>`
               : ''
           }
-          <div class="field">
-            <label>Default Veto Penalty (mins)</label>
-            <input type="number" class="input" data-cfg-num="defaultVetoMins" value="${s.game.defaultVetoMins ?? 15}" min="1" max="120" ${dis} />
-          </div>
         </div>
 
         <div class="card">
-          <div class="card-title" style="color:var(--accent)">Rail Rush Settings</div>
+          <div class="card-title" style="color:var(--accent)">Rail Rush & GPS Verification</div>
           <div class="grid-2">
             <div class="field">
               <label>Claim GPS Radius (m)</label>
               <input type="number" class="input" data-cfg-num="stationClaimRadiusM" value="${s.game.stationClaimRadiusM ?? 100}" min="25" max="2000" step="25" ${dis} />
+            </div>
+            <div class="field">
+              <label>GPS Accuracy Buffer (m)</label>
+              <input type="number" class="input" data-cfg-num="gpsAccuracyBufferM" value="${s.game.gpsAccuracyBufferM ?? 25}" min="0" max="150" step="5" ${dis} />
+            </div>
+            <div class="field">
+              <label>Max GPS Fix Age (sec)</label>
+              <input type="number" class="input" data-cfg-num="maxGpsAgeSec" value="${s.game.maxGpsAgeSec ?? 90}" min="15" max="600" step="15" ${dis} />
             </div>
             <div class="field">
               <label>Points per Station</label>
@@ -854,6 +1036,22 @@ class JetLagSydneyApp {
                   <input type="number" data-transit-rate="${tr.mode}" value="${trMap[tr.mode] ?? tr.coinsPerMin}" min="0" step="5" style="width:64px;background:var(--bg-card);border:1px solid var(--border-strong);border-radius:6px;padding:3px 6px;font-size:12px;text-align:right" ${dis} />
                 </div>`
               ).join('')}
+            </div>
+          </div>
+          <div class="field">
+            <label>Powerup Shop Prices & Availability</label>
+            <div style="display:flex;flex-direction:column;gap:5px">
+              ${POWERUPS_SHOP.map((pw) => {
+                const cfg = pwCfg[pw.id] || { cost: pw.cost, enabled: true };
+                return `
+                  <div class="row-between" style="background:var(--bg);padding:6px 9px;border-radius:8px;border:1px solid var(--border);gap:8px">
+                    <label class="row" style="gap:6px;flex:1;cursor:pointer">
+                      <input type="checkbox" data-pw-enabled="${pw.id}" ${cfg.enabled !== false ? 'checked' : ''} ${dis} />
+                      <span style="font-size:12px;font-weight:600">${esc(pw.title)}</span>
+                    </label>
+                    <input type="number" data-pw-cost="${pw.id}" value="${cfg.cost ?? pw.cost}" min="0" step="50" style="width:74px;background:var(--bg-card);border:1px solid var(--border-strong);border-radius:6px;padding:3px 6px;font-size:12px;text-align:right" ${dis} />
+                  </div>`;
+              }).join('')}
             </div>
           </div>
         </div>
@@ -1126,15 +1324,28 @@ class JetLagSydneyApp {
                 </div>
                 <div class="grid-2">
                   <div class="field">
+                    <label>Origin Hub</label>
+                    <select id="ws-hub" class="select" ${access.canEditRules ? '' : 'disabled'}>
+                      ${['Central Station', 'Strathfield', 'Parramatta', 'North Sydney', 'Chatswood']
+                        .map((nm) => `<option value="${nm}" ${s.winSectors.centerName === nm ? 'selected' : ''}>${nm}</option>`)
+                        .join('')}
+                    </select>
+                  </div>
+                  <div class="field">
                     <label>Sectors</label>
                     <select id="ws-count" class="select" ${access.canEditRules ? '' : 'disabled'}>
                       ${[2, 3, 4].map((n) => `<option value="${n}" ${s.winSectors.count === n ? 'selected' : ''}>${n} Sectors</option>`).join('')}
                     </select>
                   </div>
-                  <div class="field">
-                    <label>Rotation (${s.winSectors.rotationDeg}°)</label>
-                    <input type="range" id="ws-rot" min="-180" max="180" step="5" value="${s.winSectors.rotationDeg}" ${access.canEditRules ? '' : 'disabled'} />
-                  </div>
+                </div>
+                <div class="field">
+                  <label>Rotation (${s.winSectors.rotationDeg}°)</label>
+                  <input type="range" id="ws-rot" min="-180" max="180" step="5" value="${s.winSectors.rotationDeg}" ${access.canEditRules ? '' : 'disabled'} />
+                </div>
+                <div class="grid-2" style="gap:5px">
+                  ${Array.from({ length: s.winSectors.count || 3 }, (_, i) => `
+                    <input type="text" class="input" data-ws-label="${i}" value="${esc(s.winSectors.labels?.[i] || `Sector ${i + 1}`)}" placeholder="Sector ${i + 1}" style="padding:5px 8px;font-size:12px" ${access.canEditRules ? '' : 'disabled'} />
+                  `).join('')}
                 </div>
               </div>
             `
@@ -1211,9 +1422,17 @@ class JetLagSydneyApp {
               ? `
                 <div class="field">
                   <label>Dividing Line</label>
-                  <select id="ctf-preset-select" class="select" ${access.canEditRules ? '' : 'disabled'}>
-                    ${CTF_PRESETS.map((p) => `<option value="${p.id}" ${s.dividingLine.id === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
-                  </select>
+                  <div class="row" style="gap:6px">
+                    <select id="ctf-preset-select" class="select" style="flex:1" ${access.canEditRules ? '' : 'disabled'}>
+                      ${CTF_PRESETS.map((p) => `<option value="${p.id}" ${s.dividingLine.id === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+                      ${s.dividingLine.id === 'custom' ? `<option value="custom" selected>Custom Drawn Border</option>` : ''}
+                    </select>
+                    ${access.canEditRules ? `<button class="btn btn-secondary btn-xs" id="btn-ctf-draw-border" title="Tap 2 points on the map to draw a custom border">Draw 2-Tap</button>` : ''}
+                  </div>
+                </div>
+                <div class="grid-2" style="gap:6px">
+                  <input type="text" id="ctf-side-a" class="input" value="${esc(s.dividingLine.sideALabel || 'Side A')}" placeholder="Side A Name" style="padding:5px 8px;font-size:12px" ${access.canEditRules ? '' : 'disabled'} />
+                  <input type="text" id="ctf-side-b" class="input" value="${esc(s.dividingLine.sideBLabel || 'Side B')}" placeholder="Side B Name" style="padding:5px 8px;font-size:12px" ${access.canEditRules ? '' : 'disabled'} />
                 </div>
                 ${
                   mySide
@@ -1417,27 +1636,40 @@ class JetLagSydneyApp {
     });
 
     pane.querySelector('#btn-reset-game')?.addEventListener('click', () => {
-      if (confirm('Reset scores, claims, flags, checkpoints, overlays, and timers for a new round?')) {
-        store.resetGameOnly();
-        this.toast('Game reset cleanly.');
-      }
+      showConfirmModal({
+        title: 'Reset Game Round?',
+        message: 'Reset all scores, station claims, flags, checkpoints, map overlays, and timers back to Lobby?',
+        confirmLabel: 'Reset Round',
+        danger: true,
+        onConfirm: () => {
+          store.resetGameOnly();
+          this.toast('Game reset cleanly.');
+        }
+      });
     });
 
     pane.querySelector('#btn-game-start-pause')?.addEventListener('click', () => this.toggleGameClock());
 
     pane.querySelector('#btn-start-hiding-timer')?.addEventListener('click', () => {
-      const mins = prompt('Hiding countdown duration in minutes:', String(store.get().game.hidingMins || 45));
-      if (!mins) return;
-      const num = Math.max(1, Number(mins) || 45);
-      store.mutate((s) => {
-        s.game.hidingMins = num;
-        s.game.hidingEndsAt = Date.now() + num * 60000;
-        if (s.game.status === 'lobby') {
-          s.game.status = 'running';
-          s.game.startedAt = Date.now();
+      showPromptModal({
+        title: 'Start Hiding Countdown',
+        label: 'Hiding duration (minutes)',
+        type: 'number',
+        value: String(store.get().game.hidingMins || 45),
+        submitLabel: 'Start Countdown',
+        onSubmit: (mins) => {
+          const num = Math.max(1, Number(mins) || 45);
+          store.mutate((s) => {
+            s.game.hidingMins = num;
+            s.game.hidingEndsAt = Date.now() + num * 60000;
+            if (s.game.status === 'lobby') {
+              s.game.status = 'running';
+              s.game.startedAt = Date.now();
+            }
+          }, 'clock');
+          store.addFeed({ type: 'system', text: `Hiding countdown started (${num} minutes).` });
         }
-      }, 'clock');
-      store.addFeed({ type: 'system', text: `Hiding countdown started (${num} minutes).` });
+      });
     });
 
     pane.querySelectorAll('[data-pick-mode]').forEach((btn) => {
@@ -1482,6 +1714,130 @@ class JetLagSydneyApp {
           if (key === 'hidingRadiusM' && s.hidingZone) s.hidingZone.radiusM = val;
         }, 'rules');
       });
+    });
+
+    pane.querySelectorAll('[data-cfg-float]').forEach((inp) => {
+      inp.addEventListener('change', () => {
+        if (!getAccess(store.get()).canEditRules) return;
+        const key = inp.dataset.cfgFloat;
+        const val = Math.max(0.25, Number(inp.value) || 1);
+        store.mutate((s) => { s.game[key] = val; }, 'rules');
+      });
+    });
+
+    pane.querySelectorAll('[data-accent-theme]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.accentTheme;
+        store.mutate((s) => { s.accentTheme = id; }, 'accent', false);
+        this.applyAccentTheme(id);
+        this.renderGamePane();
+      });
+    });
+
+    const BOUNDARY_HUBS_MAP = {
+      Central: [-33.88488, 151.20665],
+      'Circular Quay': [-33.86133, 151.21046],
+      Strathfield: [-33.87158, 151.09427],
+      Parramatta: [-33.81744, 151.00493],
+      Chatswood: [-33.79749, 151.18111],
+      Hornsby: [-33.70316, 151.09835],
+      Hurstville: [-33.96751, 151.10261]
+    };
+
+    pane.querySelector('#cb-pb-enabled')?.addEventListener('change', (e) => {
+      if (!getAccess(store.get()).canEditRules) return;
+      store.mutate((s) => {
+        if (!s.game.playBoundary) s.game.playBoundary = { enabled: false, center: [-33.88488, 151.20665], centerName: 'Central', radiusKm: 25 };
+        s.game.playBoundary.enabled = e.target.checked;
+      }, 'boundary');
+      this.toast(e.target.checked ? 'Play Area Boundary enabled on map.' : 'Play Area Boundary disabled.');
+    });
+
+    pane.querySelector('#sel-pb-hub')?.addEventListener('change', (e) => {
+      if (!getAccess(store.get()).canEditRules) return;
+      const name = e.target.value;
+      const coords = BOUNDARY_HUBS_MAP[name];
+      if (!coords) return;
+      store.mutate((s) => {
+        if (!s.game.playBoundary) s.game.playBoundary = { enabled: true, center: coords, centerName: name, radiusKm: 25 };
+        s.game.playBoundary.center = coords;
+        s.game.playBoundary.centerName = name;
+      }, 'boundary');
+    });
+
+    pane.querySelector('#inp-pb-radius')?.addEventListener('change', (e) => {
+      if (!getAccess(store.get()).canEditRules) return;
+      const km = Math.max(1, Number(e.target.value) || 25);
+      store.mutate((s) => {
+        if (!s.game.playBoundary) s.game.playBoundary = { enabled: true, center: [-33.88488, 151.20665], centerName: 'Central', radiusKm: km };
+        s.game.playBoundary.radiusKm = km;
+      }, 'boundary');
+    });
+
+    pane.querySelectorAll('[data-pw-enabled]').forEach((cb) => {
+      cb.addEventListener('change', () => {
+        if (!getAccess(store.get()).canEditRules) return;
+        const id = cb.dataset.pwEnabled;
+        store.mutate((s) => {
+          if (!s.game.powerupConfig) s.game.powerupConfig = {};
+          const base = POWERUPS_SHOP.find((x) => x.id === id);
+          s.game.powerupConfig[id] = { ...(s.game.powerupConfig[id] || { cost: base?.cost || 500 }), enabled: cb.checked };
+        }, 'rules');
+      });
+    });
+
+    pane.querySelectorAll('[data-pw-cost]').forEach((inp) => {
+      inp.addEventListener('change', () => {
+        if (!getAccess(store.get()).canEditRules) return;
+        const id = inp.dataset.pwCost;
+        const cost = Math.max(0, Number(inp.value) || 0);
+        store.mutate((s) => {
+          if (!s.game.powerupConfig) s.game.powerupConfig = {};
+          s.game.powerupConfig[id] = { ...(s.game.powerupConfig[id] || { enabled: true }), cost };
+        }, 'rules');
+      });
+    });
+
+    pane.querySelector('#btn-export-rules')?.addEventListener('click', () => {
+      const s = store.get();
+      const preset = {
+        type: 'jetlag-sydney-rules-preset',
+        version: 1,
+        mode: s.game.mode,
+        game: s.game,
+        permissions: s.permissions,
+        dividingLine: s.dividingLine,
+        winSectors: s.winSectors
+      };
+      const blob = new Blob([JSON.stringify(preset, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `jetlag-sydney-rules-${s.game.mode}.json`;
+      a.click();
+      this.toast('Exported custom rules preset JSON.');
+    });
+
+    pane.querySelector('#btn-import-rules')?.addEventListener('click', () => {
+      if (!getAccess(store.get()).canEditRules) return;
+      const inp = document.createElement('input');
+      inp.type = 'file';
+      inp.accept = 'application/json';
+      inp.onchange = async () => {
+        try {
+          const data = JSON.parse(await inp.files[0].text());
+          if (!data.game) throw new Error('Invalid rules preset');
+          store.mutate((s) => {
+            s.game = { ...s.game, ...data.game, status: s.game.status, startedAt: s.game.startedAt, elapsedBeforePauseMs: s.game.elapsedBeforePauseMs };
+            if (data.permissions) s.permissions = { ...s.permissions, ...data.permissions };
+            if (data.dividingLine) s.dividingLine = { ...s.dividingLine, ...data.dividingLine };
+            if (data.winSectors) s.winSectors = { ...s.winSectors, ...data.winSectors };
+          }, 'mode');
+          this.toast('Imported custom rules preset!');
+        } catch {
+          this.toast('Invalid rules preset JSON file.');
+        }
+      };
+      inp.click();
     });
 
     pane.querySelectorAll('[data-cfg-bool]').forEach((cb) => {
@@ -1570,15 +1926,38 @@ class JetLagSydneyApp {
 
     pane.querySelectorAll('[data-edit-team]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        const t = store.get().teams.find((x) => x.id === btn.dataset.editTeam);
+        const s = store.get();
+        const t = s.teams.find((x) => x.id === btn.dataset.editTeam);
         if (!t) return;
-        const name = prompt('Team name:', t.name);
-        if (name && name.trim()) {
-          store.mutate((s) => {
-            const tm = s.teams.find((x) => x.id === t.id);
-            if (tm) tm.name = name.trim();
-          }, 'teams');
-        }
+        const canDelete = s.teams.length > 1;
+        showEditTeamModal(t, canDelete, {
+          onSave: ({ name, color }) => {
+            store.mutate((st) => {
+              const tm = st.teams.find((x) => x.id === t.id);
+              if (!tm) return;
+              tm.name = name;
+              tm.color = color;
+              Object.values(st.players || {}).forEach((p) => {
+                if (p.teamId === tm.id) p.color = color;
+              });
+            }, 'teams');
+            this.toast(`Updated ${name}.`);
+          },
+          onDelete: () => {
+            store.mutate((st) => {
+              if (st.teams.length <= 1) return;
+              st.teams = st.teams.filter((x) => x.id !== t.id);
+              const fallback = st.teams[0];
+              Object.values(st.players || {}).forEach((p) => {
+                if (p.teamId === t.id && fallback) {
+                  p.teamId = fallback.id;
+                  p.color = fallback.color;
+                }
+              });
+            }, 'teams');
+            this.toast(`Deleted team ${t.name}.`);
+          }
+        });
       });
     });
 
@@ -1689,8 +2068,13 @@ class JetLagSydneyApp {
 
     pane.querySelectorAll('[data-ans-custom]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        const ans = prompt('Enter your answer to this Hide + Seek question:');
-        if (ans && ans.trim()) this.answerQuestion(btn.dataset.ansCustom, ans.trim());
+        showPromptModal({
+          title: 'Answer Hide + Seek Question',
+          label: 'Your answer',
+          placeholder: 'e.g. Same LGA / Within 500m of water',
+          submitLabel: 'Send Answer',
+          onSubmit: (ans) => this.answerQuestion(btn.dataset.ansCustom, ans)
+        });
       });
     });
 
@@ -1722,11 +2106,36 @@ class JetLagSydneyApp {
       this.toast(`Deducted ${cost} coins (${mins} min ride).`);
     });
 
+    const WS_HUBS = {
+      'Central Station': [-33.8832, 151.2067],
+      Strathfield: [-33.87158, 151.09427],
+      Parramatta: [-33.81744, 151.00493],
+      'North Sydney': [-33.84022, 151.20726],
+      Chatswood: [-33.79749, 151.18111]
+    };
+    pane.querySelector('#ws-hub')?.addEventListener('change', (e) => {
+      const name = e.target.value;
+      const coords = WS_HUBS[name];
+      if (!coords) return;
+      store.mutate((s) => {
+        s.winSectors.centerName = name;
+        s.winSectors.center = coords;
+      }, 'win_sectors');
+    });
     pane.querySelector('#ws-count')?.addEventListener('change', (e) => {
-      store.mutate((s) => { s.winSectors.count = Number(e.target.value); }, 'sectors');
+      store.mutate((s) => { s.winSectors.count = Number(e.target.value); }, 'win_sectors');
     });
     pane.querySelector('#ws-rot')?.addEventListener('input', (e) => {
-      store.mutate((s) => { s.winSectors.rotationDeg = Number(e.target.value); }, 'sectors');
+      store.mutate((s) => { s.winSectors.rotationDeg = Number(e.target.value); }, 'win_sectors');
+    });
+    pane.querySelectorAll('[data-ws-label]').forEach((inp) => {
+      inp.addEventListener('change', () => {
+        const idx = Number(inp.dataset.wsLabel);
+        store.mutate((s) => {
+          if (!Array.isArray(s.winSectors.labels)) s.winSectors.labels = [];
+          s.winSectors.labels[idx] = inp.value.trim() || `Sector ${idx + 1}`;
+        }, 'win_sectors');
+      });
     });
 
     // Rail Rush
@@ -1740,8 +2149,9 @@ class JetLagSydneyApp {
       const res = this.mapCtrl.findNearestStation(p.lat, p.lng);
       if (!res) return;
       const maxM = Number(s.game.stationClaimRadiusM) || 100;
-      if (access.mustVerifyGps && res.distanceM > maxM) {
-        return this.toast(`Too far from ${res.station.name} (${formatDistance(res.distanceM)} away — must be within ${maxM}m).`);
+      const prox = evaluateGpsProximity(s, p, res.station.lat, res.station.lng, maxM);
+      if (!prox.allowed) {
+        return this.toast(`${res.station.name}: ${prox.reason}`);
       }
       this.toggleStationClaim(res.station, true);
       this.mapCtrl.flyToStation(res.station.id);
@@ -1759,7 +2169,18 @@ class JetLagSydneyApp {
     // CTF
     pane.querySelector('#ctf-preset-select')?.addEventListener('change', (e) => {
       const p = CTF_PRESETS.find((x) => x.id === e.target.value);
-      if (p) store.mutate((s) => { s.dividingLine = { ...p, enabled: true }; }, 'ctf');
+      if (p) store.mutate((s) => { s.dividingLine = { ...p, enabled: true }; }, 'dividing_line');
+    });
+    pane.querySelector('#btn-ctf-draw-border')?.addEventListener('click', () => {
+      this.selectMapTool('ctf_border');
+      if (window.innerWidth <= 920) document.getElementById('side-panel').classList.remove('mobile-open');
+      this.toast('Tap 2 points on the map to draw your custom CTF dividing line.');
+    });
+    pane.querySelector('#ctf-side-a')?.addEventListener('change', (e) => {
+      store.mutate((s) => { s.dividingLine.sideALabel = e.target.value.trim() || 'Side A'; }, 'dividing_line');
+    });
+    pane.querySelector('#ctf-side-b')?.addEventListener('change', (e) => {
+      store.mutate((s) => { s.dividingLine.sideBLabel = e.target.value.trim() || 'Side B'; }, 'dividing_line');
     });
 
     pane.querySelectorAll('[data-flag-status]').forEach((btn) => {
@@ -1879,12 +2300,9 @@ class JetLagSydneyApp {
       }
       if (access.mustVerifyGps) {
         const maxM = Number(s.game.stationClaimRadiusM) || 100;
-        if (myPlayer?.lat == null) {
-          return this.toast(`Live GPS required to claim ${station.name} (must be within ${maxM}m).`);
-        }
-        const dist = haversineM(myPlayer.lat, myPlayer.lng, station.lat, station.lng);
-        if (dist > maxM) {
-          return this.toast(`Too far from ${station.name} (${formatDistance(dist)} away — limit is ${maxM}m).`);
+        const prox = evaluateGpsProximity(s, myPlayer, station.lat, station.lng, maxM);
+        if (!prox.allowed) {
+          return this.toast(`${station.name}: ${prox.reason}`);
         }
       }
     }
@@ -1970,10 +2388,9 @@ class JetLagSydneyApp {
       }
       if (access.mustVerifyGps) {
         const maxM = Number(s.game.checkpointRadiusM) || 100;
-        if (myPlayer?.lat == null) return this.toast(`Live GPS required to check in at ${cpObj.name}.`);
-        const dist = haversineM(myPlayer.lat, myPlayer.lng, cpObj.lat, cpObj.lng);
-        if (dist > maxM) {
-          return this.toast(`Too far from ${cpObj.name} (${formatDistance(dist)} away — must be within ${maxM}m).`);
+        const prox = evaluateGpsProximity(s, myPlayer, cpObj.lat, cpObj.lng, maxM);
+        if (!prox.allowed) {
+          return this.toast(`${cpObj.name}: ${prox.reason}`);
         }
       }
     }
@@ -2091,7 +2508,10 @@ class JetLagSydneyApp {
     const isHostGm = Boolean(store.getLocalPlayer()?.isEventHost);
     const myTeam = this.getActionTeam(this.hostTargetTeamId);
     const isCurse = card.wheelMode === 'curses';
-    const reward = isCurse ? card.cost : myTeam?.doubleNext ? card.coins * 2 : card.coins;
+    const coinMult = (Number(s.game.challengeCoinMultiplier) || 1) * (myTeam?.doubleNext ? 2 : 1);
+    const vetoMult = (Number(s.game.vetoMultiplier) || 1) * (myTeam?.doubleNext ? 2 : 1);
+    const reward = isCurse ? card.cost : Math.round((card.coins || 500) * coinMult);
+    const effVetoMins = Math.max(1, Math.round((card.vetoMins || s.game.defaultVetoMins || 15) * vetoMult));
 
     slot.innerHTML = `
       <div class="landed-card">
@@ -2121,11 +2541,11 @@ class JetLagSydneyApp {
               </div>
             `
             : `
-              <div class="muted" style="font-size:11.5px">Veto Penalty: ${card.vetoMins} mins ${myTeam?.doubleNext ? '· 2X DOUBLE ACTIVE' : ''}</div>
+              <div class="muted" style="font-size:11.5px">Veto Penalty: ${effVetoMins} mins ${myTeam?.doubleNext ? '· 2X DOUBLE ACTIVE' : ''}</div>
               <div class="row">
                 <button class="btn btn-primary btn-sm" id="btn-accept-landed" style="flex:1">${isHostGm ? 'Assign' : 'Accept'}</button>
                 <button class="btn btn-accent btn-sm" id="btn-complete-landed">Complete</button>
-                <button class="btn btn-danger btn-sm" id="btn-veto-landed">Veto (${card.vetoMins}m)</button>
+                <button class="btn btn-danger btn-sm" id="btn-veto-landed">Veto (${effVetoMins}m)</button>
               </div>
             `
         }
@@ -2176,7 +2596,10 @@ class JetLagSydneyApp {
     if (acSlot) {
       const ac = myTeam?.activeChallenge;
       if (ac) {
-        const reward = myTeam.doubleNext ? ac.coins * 2 : ac.coins;
+        const coinMult = (Number(s.game.challengeCoinMultiplier) || 1) * (myTeam.doubleNext ? 2 : 1);
+        const vetoMult = (Number(s.game.vetoMultiplier) || 1) * (myTeam.doubleNext ? 2 : 1);
+        const reward = Math.round((ac.coins || 500) * coinMult);
+        const effVetoMins = Math.max(1, Math.round((ac.vetoMins || s.game.defaultVetoMins || 15) * vetoMult));
         acSlot.innerHTML = `
           <div class="card" style="border-color:var(--accent-2)">
             <div class="row-between">
@@ -2187,7 +2610,7 @@ class JetLagSydneyApp {
             <p class="muted">${esc(ac.description)}</p>
             <div class="row">
               <button class="btn btn-primary btn-sm" id="btn-ac-complete" style="flex:1">Complete & Claim</button>
-              <button class="btn btn-danger btn-sm" id="btn-ac-veto">Veto (${ac.vetoMins}m)</button>
+              <button class="btn btn-danger btn-sm" id="btn-ac-veto">Veto (${effVetoMins}m)</button>
             </div>
           </div>
         `;
@@ -2235,6 +2658,11 @@ class JetLagSydneyApp {
     if (shopSlot) {
       const shopTeam = this.getActionTeam(this.hostTargetTeamId);
       const isHostGm = Boolean(store.getLocalPlayer()?.isEventHost);
+      const pwCfg = s.game.powerupConfig || {};
+      const visiblePowerups = POWERUPS_SHOP.filter((pw) => pwCfg[pw.id]?.enabled !== false).map((pw) => ({
+        ...pw,
+        cost: pwCfg[pw.id]?.cost ?? pw.cost
+      }));
       shopSlot.innerHTML = `
         <div class="card">
           <div class="card-header">
@@ -2251,16 +2679,22 @@ class JetLagSydneyApp {
                 </div>`
               : ''
           }
-          ${POWERUPS_SHOP.map(
-            (pw) => `
-            <div class="feed-item">
-              <div class="row-between">
-                <div class="row"><span class="pw-badge">${esc(pw.icon)}</span><strong>${esc(pw.title)}</strong></div>
-                <button class="btn btn-xs btn-primary" data-buy-pw="${pw.id}">${pw.cost} coins</button>
-              </div>
-              <div class="muted" style="font-size:11.5px">${esc(pw.description)}</div>
-            </div>`
-          ).join('')}
+          ${
+            visiblePowerups.length
+              ? visiblePowerups
+                  .map(
+                    (pw) => `
+                  <div class="feed-item">
+                    <div class="row-between">
+                      <div class="row"><span class="pw-badge">${esc(pw.icon)}</span><strong>${esc(pw.title)}</strong></div>
+                      <button class="btn btn-xs btn-primary" data-buy-pw="${pw.id}">${pw.cost} coins</button>
+                    </div>
+                    <div class="muted" style="font-size:11.5px">${esc(pw.description)}</div>
+                  </div>`
+                  )
+                  .join('')
+              : `<div class="muted" style="text-align:center;padding:8px 0">All powerups are currently disabled in Rules & Settings.</div>`
+          }
         </div>
       `;
       shopSlot.querySelector('#gm-shop-team')?.addEventListener('change', (e) => {
@@ -2269,7 +2703,7 @@ class JetLagSydneyApp {
       });
       shopSlot.querySelectorAll('[data-buy-pw]').forEach((btn) => {
         btn.addEventListener('click', () => {
-          const pw = POWERUPS_SHOP.find((x) => x.id === btn.dataset.buyPw);
+          const pw = visiblePowerups.find((x) => x.id === btn.dataset.buyPw);
           if (!pw) return;
           const team = this.getActionTeam(this.hostTargetTeamId);
           if (team.coins < pw.cost) return this.toast(`Not enough coins. Need ${pw.cost} coins.`);
@@ -2465,11 +2899,18 @@ class JetLagSydneyApp {
       });
 
       deckSlot.querySelector('#btn-clear-deck')?.addEventListener('click', () => {
-        if (confirm(`Delete all ${isCh ? 'challenges' : 'curses'} in this list?`)) {
-          store.mutate((st) => { st.decks[this.deckKind] = []; }, 'deck');
-          this.refreshWheelPool();
-          this.renderWheelLanded();
-        }
+        showConfirmModal({
+          title: `Clear All ${isCh ? 'Challenges' : 'Curses'}?`,
+          message: `Permanently delete all ${list.length} ${isCh ? 'challenges' : 'curses'} in this deck?`,
+          confirmLabel: 'Delete All',
+          danger: true,
+          onConfirm: () => {
+            store.mutate((st) => { st.decks[this.deckKind] = []; }, 'deck');
+            this.refreshWheelPool();
+            this.renderWheelLanded();
+            this.toast(`Cleared ${isCh ? 'challenges' : 'curses'} deck.`);
+          }
+        });
       });
 
       deckSlot.querySelectorAll('[data-edit-card]').forEach((btn) => {
@@ -2505,31 +2946,39 @@ class JetLagSydneyApp {
   }
 
   completeChallengeCard(card, overrideTeamId = null) {
+    const s = store.get();
     const targetTeam = this.getActionTeam(overrideTeamId);
-    const mult = targetTeam.doubleNext ? 2 : 1;
-    const reward = (card.coins || 500) * mult;
-    store.mutate((s) => {
-      const t = s.teams.find((x) => x.id === targetTeam.id);
+    const mult = (Number(s.game.challengeCoinMultiplier) || 1) * (targetTeam.doubleNext ? 2 : 1);
+    const reward = Math.round((card.coins || 500) * mult);
+    const removeAfter = Boolean(s.game.removeCompletedChallenges);
+    store.mutate((st) => {
+      const t = st.teams.find((x) => x.id === targetTeam.id);
       if (t) {
         t.coins += reward;
         t.points += 1;
         t.doubleNext = false;
         t.activeChallenge = null;
       }
+      if (removeAfter && card.id) {
+        const ch = st.decks.challenges.find((c) => c.id === card.id);
+        if (ch) ch.active = false;
+      }
     }, 'challenge');
+    if (removeAfter) this.refreshWheelPool();
     store.addFeed({
       type: 'challenge',
-      text: `${targetTeam.name} COMPLETED "${card.title}" (+${reward} coins, +1 pt${mult === 2 ? ' — 2X DOUBLED' : ''}).`
+      text: `${targetTeam.name} COMPLETED "${card.title}" (+${reward} coins, +1 pt${targetTeam.doubleNext ? ' — 2X DOUBLED' : ''}).`
     });
     this.toast(`Completed for ${targetTeam.name}! +${reward} coins`);
   }
 
   vetoChallengeCard(card, overrideTeamId = null) {
+    const s = store.get();
     const targetTeam = this.getActionTeam(overrideTeamId);
-    const mult = targetTeam.doubleNext ? 2 : 1;
-    const mins = (card.vetoMins || 15) * mult;
-    store.mutate((s) => {
-      const t = s.teams.find((x) => x.id === targetTeam.id);
+    const mult = (Number(s.game.vetoMultiplier) || 1) * (targetTeam.doubleNext ? 2 : 1);
+    const mins = Math.max(1, Math.round((card.vetoMins || s.game.defaultVetoMins || 15) * mult));
+    store.mutate((st) => {
+      const t = st.teams.find((x) => x.id === targetTeam.id);
       if (t) {
         t.vetoEndsAt = Date.now() + mins * 60000;
         t.doubleNext = false;
@@ -2550,27 +2999,39 @@ class JetLagSydneyApp {
     const opponent = overrideTargetTeamId
       ? (s.teams.find((t) => t.id === overrideTargetTeamId) || s.teams[0])
       : (s.teams.find((t) => t.id !== myTeam?.id) || s.teams[0]);
+
+    const doCast = () => {
+      store.mutate((st) => {
+        if (!isHostGm && myTeam && st.game.rules.economy) {
+          const t = st.teams.find((x) => x.id === myTeam.id);
+          if (t) t.coins = Math.max(0, t.coins - (curse.cost || 0));
+        }
+        st.activeCurses.push({
+          id: uid('ac'),
+          curseId: curse.id,
+          title: curse.title,
+          description: curse.description,
+          fromTeamId: myTeam?.id || null,
+          targetTeamId: opponent.id,
+          castAt: Date.now(),
+          expiresAt: Date.now() + (curse.durationMins || 15) * 60000
+        });
+      }, 'curse');
+      store.addFeed({ type: 'curse', text: `CAST "${curse.title}" on ${opponent.name} (${curse.durationMins}m): ${curse.description}` });
+      this.toast(`Curse cast on ${opponent.name}.`);
+    };
+
     if (!isHostGm && myTeam && s.game.rules.economy && myTeam.coins < curse.cost) {
-      if (!confirm(`${myTeam.name} only has ${myTeam.coins} coins (Curse costs ${curse.cost}). Cast anyway?`)) return;
-    }
-    store.mutate((st) => {
-      if (!isHostGm && myTeam && st.game.rules.economy) {
-        const t = st.teams.find((x) => x.id === myTeam.id);
-        if (t) t.coins = Math.max(0, t.coins - (curse.cost || 0));
-      }
-      st.activeCurses.push({
-        id: uid('ac'),
-        curseId: curse.id,
-        title: curse.title,
-        description: curse.description,
-        fromTeamId: myTeam?.id || null,
-        targetTeamId: opponent.id,
-        castAt: Date.now(),
-        expiresAt: Date.now() + (curse.durationMins || 15) * 60000
+      showConfirmModal({
+        title: 'Low Coin Warning',
+        message: `${myTeam.name} only has ${myTeam.coins} coins (this curse costs ${curse.cost}). Cast anyway?`,
+        confirmLabel: 'Cast Anyway',
+        danger: true,
+        onConfirm: doCast
       });
-    }, 'curse');
-    store.addFeed({ type: 'curse', text: `CAST "${curse.title}" on ${opponent.name} (${curse.durationMins}m): ${curse.description}` });
-    this.toast(`Curse cast on ${opponent.name}.`);
+      return;
+    }
+    doCast();
   }
 
   // ===== TAB 3: LIVE ACTIVITY FEED, CHAT & PHOTO PROOFS =====
@@ -2833,13 +3294,24 @@ class JetLagSydneyApp {
                 <button class="btn ${s.room.shareGps ? 'btn-danger' : 'btn-primary'} btn-sm" id="btn-toggle-gps" style="flex:1">
                   ${icon('crosshair', 13)} ${s.room.shareGps ? 'Stop GPS' : 'Start Live GPS'}
                 </button>
+                ${s.room.shareGps ? `<button class="btn btn-secondary btn-sm" id="btn-refresh-gps" title="Force fresh GPS reading">${icon('refresh', 13)}</button>` : ''}
                 <button class="btn btn-secondary btn-sm" id="btn-toggle-hide-gps">${me.gpsHidden ? 'Show Pin' : 'Hide Pin'}</button>
                 <button class="btn btn-secondary btn-sm" id="btn-toggle-freeze-gps">${me.gpsFrozen ? 'Unfreeze' : 'Freeze'}</button>
               </div>
+              <div class="row-between" style="gap:6px">
+                <span class="gps-status-badge ${esc(s.gpsTelemetry?.status || 'off')}">
+                  GPS: ${esc((s.gpsTelemetry?.status || 'off').toUpperCase())}${s.gpsTelemetry?.accuracy != null ? ` · ±${s.gpsTelemetry.accuracy}m` : ''}${s.gpsTelemetry?.speedKmh != null && s.gpsTelemetry.speedKmh >= 2 ? ` · ${s.gpsTelemetry.speedKmh} km/h` : ''}
+                </span>
+                <div class="row" style="gap:4px">
+                  <button class="btn btn-xs ${s.showGpsTrail ? 'btn-primary' : 'btn-ghost'}" id="btn-live-trail">${s.showGpsTrail ? 'Trail ON' : 'Trail'}</button>
+                  ${(s.gpsTelemetry?.trail?.length || 0) > 1 ? `<button class="btn btn-xs btn-ghost" id="btn-clear-trail">Clear</button>` : ''}
+                </div>
+              </div>
+              ${s.gpsTelemetry?.errorMsg ? `<div class="muted" style="font-size:11px;color:#f87171">${esc(s.gpsTelemetry.errorMsg)}</div>` : ''}
               ${
                 nearest
                   ? `<div class="sp-badge" style="border-color:var(--accent-2);color:#2dd4bf">Nearest: <strong>${esc(nearest.station.name)}</strong> (${formatDistance(nearest.distanceM)}) · ${nearest.station.lines.join(', ')}</div>`
-                  : `<div class="muted" style="font-size:11.5px">${access.mustVerifyGps ? `Strict GPS is ON — you must be within ${s.game.stationClaimRadiusM ?? 100}m of a station to claim it.` : 'Start Live GPS to track your distance to stations.'}</div>`
+                  : `<div class="muted" style="font-size:11.5px">${access.mustVerifyGps ? `Strict GPS is ON — you must be within ${s.game.stationClaimRadiusM ?? 100}m (+${s.game.gpsAccuracyBufferM ?? 25}m accuracy buffer) of a station to claim it.` : 'Start Live GPS to track your distance to stations.'}</div>`
               }
               ${
                 access.canUseDemoGps
@@ -2946,7 +3418,19 @@ class JetLagSydneyApp {
       <div class="card">
         <div class="card-header">
           <div class="card-title">Preferences & Backup</div>
-          <span class="tag-pill mono">v14</span>
+          <span class="tag-pill mono">v15</span>
+        </div>
+        <div class="field">
+          <label>Accent Theme</label>
+          <div class="accent-swatch-row">
+            ${ACCENT_THEMES.map(
+              (at) => `
+              <button type="button" class="accent-chip ${(s.accentTheme || 'gold') === at.id ? 'active' : ''}" data-live-accent="${at.id}">
+                <span class="dot" style="background:${at.color}"></span>
+                <span>${esc(at.name.split(' ')[0])}</span>
+              </button>`
+            ).join('')}
+          </div>
         </div>
         <label class="toggle-row">
           <span style="font-size:13px;font-weight:600">Wheel Sound Effects</span>
@@ -2959,15 +3443,19 @@ class JetLagSydneyApp {
       </div>
     `;
 
-    if (s.room.connected && window.qrcode) {
+    if (s.room.connected) {
       const qrBox = pane.querySelector('#room-qr-box');
       if (qrBox) {
-        try {
-          const qr = window.qrcode(0, 'M');
-          qr.addData(this.mp.getInviteUrl());
-          qr.make();
-          qrBox.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 0 });
-        } catch {}
+        const inviteUrl = this.mp.getInviteUrl();
+        ensureQrLib().then((qrcode) => {
+          if (!qrcode || !document.body.contains(qrBox)) return;
+          try {
+            const qr = qrcode(0, 'M');
+            qr.addData(inviteUrl);
+            qr.make();
+            qrBox.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 0 });
+          } catch {}
+        });
       }
     }
 
@@ -3010,11 +3498,17 @@ class JetLagSydneyApp {
     });
 
     pane.querySelector('#btn-sched-unlock')?.addEventListener('click', () => {
-      if (!confirm('Unlock this scheduled game room so you can edit the time, mode, or meeting station?')) return;
-      store.mutate((st) => {
-        if (st.scheduledRoom) st.scheduledRoom.locked = false;
-      }, 'schedule');
-      this.toast('Schedule unlocked for editing.');
+      showConfirmModal({
+        title: 'Unlock Scheduled Room?',
+        message: 'Unlock this scheduled game room so you can edit the kickoff time, mode, or meeting station?',
+        confirmLabel: 'Unlock Schedule',
+        onConfirm: () => {
+          store.mutate((st) => {
+            if (st.scheduledRoom) st.scheduledRoom.locked = false;
+          }, 'schedule');
+          this.toast('Schedule unlocked for editing.');
+        }
+      });
     });
 
     pane.querySelector('#btn-sched-rsvp')?.addEventListener('click', () => {
@@ -3041,7 +3535,7 @@ class JetLagSydneyApp {
         await navigator.clipboard.writeText(schedInviteUrl);
         this.toast('Scheduled room invite link copied.');
       } catch {
-        prompt('Copy scheduled invite link:', schedInviteUrl);
+        showCopyModal('Scheduled Room Invite Link', schedInviteUrl);
       }
     });
 
@@ -3154,6 +3648,36 @@ class JetLagSydneyApp {
       this.renderLivePane();
     });
 
+    pane.querySelector('#btn-refresh-gps')?.addEventListener('click', () => {
+      this.mp.refreshGpsFix();
+    });
+
+    pane.querySelector('#btn-live-trail')?.addEventListener('click', () => {
+      const next = !store.get().showGpsTrail;
+      store.mutate((st) => { st.showGpsTrail = next; }, 'trail', false);
+      const topBtn = document.getElementById('btn-toggle-trail');
+      if (topBtn) {
+        topBtn.classList.toggle('btn-primary', next);
+        topBtn.classList.toggle('btn-secondary', !next);
+      }
+      this.renderLivePane();
+    });
+
+    pane.querySelector('#btn-clear-trail')?.addEventListener('click', () => {
+      this.mp.clearGpsTrail();
+      this.toast('Cleared GPS breadcrumb trail.');
+      this.renderLivePane();
+    });
+
+    pane.querySelectorAll('[data-live-accent]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.liveAccent;
+        store.mutate((st) => { st.accentTheme = id; }, 'accent', false);
+        this.applyAccentTheme(id);
+        this.renderLivePane();
+      });
+    });
+
     pane.querySelector('#btn-toggle-hide-gps')?.addEventListener('click', () => {
       store.mutate((st) => {
         const p = st.players[st.localPlayerId];
@@ -3205,7 +3729,7 @@ class JetLagSydneyApp {
         await navigator.clipboard.writeText(url);
         this.toast('Invite link copied to clipboard.');
       } catch {
-        prompt('Copy invite link:', url);
+        showCopyModal('Live Room Invite Link', url);
       }
     });
 

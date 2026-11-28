@@ -1,6 +1,6 @@
 // Tactile HTML5 Canvas Challenge & Curse Randomizer Wheel with Physics & Synth Audio
-import { CHALLENGE_CATEGORIES } from '../data/challenges.js?v=14';
-import { store } from './state.js?v=14';
+import { CHALLENGE_CATEGORIES } from '../data/challenges.js?v=15';
+import { store } from './state.js?v=15';
 
 const SLICE_PALETTE = [
   '#F99D1C', '#0098CD', '#168388', '#D11F2F',
@@ -248,12 +248,13 @@ export class ChallengeWheel {
     }
 
     // Center hub button
+    const accentCol = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#F99D1C';
     ctx.beginPath();
     ctx.arc(cx, cy, 28, 0, Math.PI * 2);
     ctx.fillStyle = '#0b1020';
     ctx.fill();
     ctx.lineWidth = 4;
-    ctx.strokeStyle = '#F99D1C';
+    ctx.strokeStyle = accentCol;
     ctx.stroke();
 
     ctx.fillStyle = '#f8fafc';

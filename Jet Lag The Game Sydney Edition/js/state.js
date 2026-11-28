@@ -1,5 +1,5 @@
-import { DEFAULT_CHALLENGES, DEFAULT_CURSES, HIDE_SEEK_QUESTIONS, TRANSIT_RATES } from '../data/challenges.js?v=14';
-import { GAME_MODES, CTF_PRESETS, RACE_PRESETS, getDefaultRulesForMode } from './modes.js?v=14';
+import { DEFAULT_CHALLENGES, DEFAULT_CURSES, HIDE_SEEK_QUESTIONS, TRANSIT_RATES, POWERUPS_SHOP } from '../data/challenges.js?v=15';
+import { GAME_MODES, CTF_PRESETS, RACE_PRESETS, getDefaultRulesForMode } from './modes.js?v=15';
 
 const STORAGE_KEY = 'jetlag_sydney_state_v5';
 const TAB_PLAYER_KEY = 'jetlag_sydney_tab_player_id';
@@ -11,6 +11,10 @@ export function uid(prefix = 'id') {
 
 export function createDefaultTransitRates() {
   return Object.fromEntries(TRANSIT_RATES.map((r) => [r.mode, r.coinsPerMin]));
+}
+
+export function createDefaultPowerupConfig() {
+  return Object.fromEntries(POWERUPS_SHOP.map((p) => [p.id, { cost: p.cost, enabled: true }]));
 }
 
 export function createDefaultPermissions() {
@@ -46,7 +50,18 @@ export function createInitialState() {
     updatedAt: Date.now(),
     localPlayerId,
     theme: 'dark',
+    accentTheme: 'gold',
     soundEnabled: true,
+    showGpsTrail: false,
+    gpsTelemetry: {
+      status: 'off', // 'off' | 'acquiring' | 'live' | 'weak' | 'stale' | 'denied' | 'insecure'
+      accuracy: null,
+      speedKmh: null,
+      heading: null,
+      lastFixAt: 0,
+      errorMsg: '',
+      trail: [] // [[lat, lng], ...]
+    },
     room: {
       code: '',
       engine: 'cloud', // 'cloud' (WSS relay + BroadcastChannel) | 'firebase'
@@ -74,6 +89,8 @@ export function createInitialState() {
       hidingRadiusM: 500,
       catchRadiusM: 100,
       stationClaimRadiusM: 100,
+      gpsAccuracyBufferM: 25,
+      maxGpsAgeSec: 90,
       stationPoints: 1,
       allowStealingStations: true,
       railRushTarget: 15,
@@ -83,7 +100,17 @@ export function createInitialState() {
       checkpointRadiusM: 100,
       checkpointPoints: 1,
       orderedCheckpoints: false,
-      transitRates: createDefaultTransitRates()
+      removeCompletedChallenges: false,
+      challengeCoinMultiplier: 1,
+      vetoMultiplier: 1,
+      transitRates: createDefaultTransitRates(),
+      powerupConfig: createDefaultPowerupConfig(),
+      playBoundary: {
+        enabled: false,
+        center: [-33.88488, 151.20665],
+        centerName: 'Central',
+        radiusKm: 25
+      }
     },
     permissions: createDefaultPermissions(),
     teams: [
@@ -164,11 +191,14 @@ class Store {
         ...base,
         ...parsed,
         room: { ...base.room, ...(parsed.room || {}), connected: false, statusText: 'Solo / Local Mode' },
+        gpsTelemetry: base.gpsTelemetry,
         game: {
           ...base.game,
           ...(parsed.game || {}),
           rules: { ...base.game.rules, ...(parsed.game?.rules || {}) },
-          transitRates: { ...base.game.transitRates, ...(parsed.game?.transitRates || {}) }
+          transitRates: { ...base.game.transitRates, ...(parsed.game?.transitRates || {}) },
+          powerupConfig: { ...base.game.powerupConfig, ...(parsed.game?.powerupConfig || {}) },
+          playBoundary: { ...base.game.playBoundary, ...(parsed.game?.playBoundary || {}) }
         },
         permissions: { ...base.permissions, ...(parsed.permissions || {}) },
         dividingLine: { ...base.dividingLine, ...(parsed.dividingLine || {}) },
@@ -322,7 +352,9 @@ class Store {
           ...s.game,
           ...snap.game,
           rules: { ...s.game.rules, ...(snap.game.rules || {}) },
-          transitRates: { ...s.game.transitRates, ...(snap.game.transitRates || {}) }
+          transitRates: { ...s.game.transitRates, ...(snap.game.transitRates || {}) },
+          powerupConfig: { ...s.game.powerupConfig, ...(snap.game.powerupConfig || {}) },
+          playBoundary: { ...s.game.playBoundary, ...(snap.game.playBoundary || {}) }
         };
       }
       if (snap.permissions) s.permissions = { ...s.permissions, ...snap.permissions };

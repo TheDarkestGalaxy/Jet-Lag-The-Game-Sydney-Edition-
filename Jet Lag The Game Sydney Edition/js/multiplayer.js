@@ -1,7 +1,10 @@
-// Reliable Real-Time Multiplayer Sync:
-// Engine 1: Zero-Setup Cloud WSS Relay (MQTT over Secure WebSockets w/ Retained Room State + Failover + BroadcastChannel)
-// Engine 2: Optional Private Firebase Realtime Database (REST + SSE)
-import { store } from './state.js?v=14';
+// Reliable Real-Time Multiplayer Sync + Hardened Outdoor Sydney GPS Telemetry
+// Lazy-loads mqtt.min.js & qrcode.min.js on demand for blazing-fast initial mobile page loads!
+import { store } from './state.js?v=15';
+import { haversineM } from './modes.js?v=15';
+
+const MQTT_CDN = 'https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js';
+const QR_CDN = 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js';
 
 const MQTT_BROKERS = [
   { name: 'EMQX Cloud', url: 'wss://broker.emqx.io:8084/mqtt' },
@@ -9,6 +12,39 @@ const MQTT_BROKERS = [
 ];
 
 const TOPIC_PREFIX = 'jetlag-sydney/live/v2';
+
+const _scriptPromises = new Map();
+export function loadScriptOnce(src) {
+  if (_scriptPromises.has(src)) return _scriptPromises.get(src);
+  const p = new Promise((resolve, reject) => {
+    const existing = document.querySelector(`script[src="${src}"]`);
+    if (existing) {
+      if (existing.dataset.loaded === '1') return resolve();
+      existing.addEventListener('load', () => resolve(), { once: true });
+      existing.addEventListener('error', () => reject(new Error(`Failed to load ${src}`)), { once: true });
+      return;
+    }
+    const s = document.createElement('script');
+    s.src = src;
+    s.async = true;
+    s.crossOrigin = '';
+    s.onload = () => { s.dataset.loaded = '1'; resolve(); };
+    s.onerror = () => reject(new Error(`Failed to load ${src}`));
+    document.head.appendChild(s);
+  });
+  _scriptPromises.set(src, p);
+  return p;
+}
+
+export async function ensureQrLib() {
+  if (window.qrcode) return window.qrcode;
+  try {
+    await loadScriptOnce(QR_CDN);
+    return window.qrcode || null;
+  } catch {
+    return null;
+  }
+}
 
 /** Normalize any user input ("4k9p", "syd 4k9p", "SYD-4K9P", "MYGAME") into one consistent canonical code */
 export function normalizeRoomCode(raw) {
@@ -67,15 +103,15 @@ export class MultiplayerManager {
     this.callbacks = callbacks;
     this.mqttClient = null;
     this.brokerIdx = 0;
-    this.bc = null; // instant same-browser multi-tab sync
+    this.bc = null;
     this.firebaseES = null;
     this.geoWatchId = null;
 
-    // Separate timers so GPS ticks NEVER cancel a pending game-state broadcast!
     this.stateSyncTimer = null;
     this.playerSyncTimer = null;
     this.heartbeatTimer = null;
     this.connectTimeoutTimer = null;
+    this.gpsStaleTimer = null;
     this.lastAppliedStateTs = 0;
     this.activeTopicBase = '';
 
@@ -89,6 +125,27 @@ export class MultiplayerManager {
         if (reason === 'profile' || reason === 'teams') this.schedulePlayerSync();
       }
     });
+
+    // Screen-wake & tunnel recovery: auto-refresh GPS & resync room when phone wakes or reconnects!
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') this.handleResume();
+    });
+    window.addEventListener('online', () => this.handleResume());
+  }
+
+  handleResume() {
+    const s = store.get();
+    if (s.room.shareGps) {
+      this.refreshGpsFix(true);
+    }
+    if (s.room.connected) {
+      this.publishLocalPlayerNow();
+      if (this.mqttClient?.connected && this.activeTopicBase) {
+        try {
+          this.mqttClient.publish(`${this.activeTopicBase}/ping`, JSON.stringify({ senderId: s.localPlayerId, ts: Date.now() }));
+        } catch {}
+      }
+    }
   }
 
   getInviteUrl() {
@@ -131,10 +188,11 @@ export class MultiplayerManager {
     }
   }
 
-  // ===== ENGINE 1: ZERO-SETUP CLOUD WSS RELAY (MQTT) + BROADCASTCHANNEL =====
+  // ===== ENGINE 1: ZERO-SETUP CLOUD WSS RELAY (LAZY-LOADED MQTT) + BROADCASTCHANNEL =====
   hostPeerRoom(rawCode) {
     const code = normalizeRoomCode(rawCode) || generateRoomCode();
-    return this.connectCloudRoom(code, true);
+    this.connectCloudRoom(code, true);
+    return code;
   }
 
   joinPeerRoom(rawCode) {
@@ -143,10 +201,11 @@ export class MultiplayerManager {
       this.callbacks.onToast?.('Enter a valid room code (e.g. SYD-4K9P or 4K9P).');
       return '';
     }
-    return this.connectCloudRoom(code, false);
+    this.connectCloudRoom(code, false);
+    return code;
   }
 
-  connectCloudRoom(code, isCreating = false, brokerIdx = 0) {
+  async connectCloudRoom(code, isCreating = false, brokerIdx = 0) {
     this.disconnect(true);
     this.brokerIdx = brokerIdx;
     this.lastAppliedStateTs = 0;
@@ -163,8 +222,15 @@ export class MultiplayerManager {
       s.room.statusText = `Connecting to ${code}...`;
     }, 'room_status', false);
 
-    // Always enable instant BroadcastChannel sync for local multi-tab testing
     this.setupBroadcastChannel(key, isCreating);
+
+    // Lazy-load mqtt.min.js + qrcode.min.js on demand so startup stays ultra-fast!
+    if (!window.mqtt) {
+      try {
+        await loadScriptOnce(MQTT_CDN);
+      } catch {}
+    }
+    ensureQrLib(); // fire-and-forget for QR rendering
 
     if (!window.mqtt) {
       store.mutate((s) => {
@@ -188,10 +254,8 @@ export class MultiplayerManager {
       });
       this.mqttClient = client;
 
-      // Failover to secondary WSS broker if primary doesn't connect within 6s
       this.connectTimeoutTimer = setTimeout(() => {
         if (!client.connected && this.mqttClient === client && brokerIdx + 1 < MQTT_BROKERS.length) {
-          console.warn(`Broker ${broker.name} timed out — failing over...`);
           this.connectCloudRoom(code, isCreating, brokerIdx + 1);
         }
       }, 6000);
@@ -201,26 +265,20 @@ export class MultiplayerManager {
         if (this.mqttClient !== client) return;
 
         client.subscribe(`${base}/#`, { qos: 0 }, (err) => {
-          if (err) {
-            console.warn('Subscribe failed:', err);
-            return;
-          }
+          if (err) return;
           store.mutate((s) => {
             s.room.connected = true;
             s.room.statusText = `Live · ${code}`;
           }, 'room_status', false);
 
-          // Immediately announce our own player node (retained so late joiners see everyone!)
           this.publishLocalPlayerNow();
 
-          // If creating a new room, seed retained state immediately; if joining, request sync if no retained state arrives
           if (isCreating) {
             this.publishStateNow();
             store.addFeed({ type: 'system', text: `Live room ${code} created. Share the code or invite link.` }, true);
             this.callbacks.onToast?.(`Room ${code} is LIVE.`);
           } else {
             this.callbacks.onToast?.(`Joined live room ${code}.`);
-            // Ask any active peers to resend if broker didn't have retained state yet
             try {
               client.publish(`${base}/ping`, JSON.stringify({ senderId: store.get().localPlayerId, ts: Date.now() }));
             } catch {}
@@ -248,37 +306,26 @@ export class MultiplayerManager {
               }, 'remote_sync', false);
             }
           } else if (topic === `${base}/ping`) {
-            // Peer requested current state/presence
             this.publishLocalPlayerNow();
             if (store.get().room.isHost) this.publishStateNow();
           }
-        } catch (e) {
-          console.warn('Bad room packet:', e);
-        }
+        } catch {}
       });
 
       client.on('reconnect', () => {
-        store.mutate((s) => {
-          s.room.statusText = `Reconnecting ${code}...`;
-        }, 'room_status', false);
+        store.mutate((s) => { s.room.statusText = `Reconnecting ${code}...`; }, 'room_status', false);
       });
 
       client.on('offline', () => {
-        store.mutate((s) => {
-          s.room.statusText = `Offline (${code}) — retrying...`;
-        }, 'room_status', false);
+        store.mutate((s) => { s.room.statusText = `Offline (${code}) — retrying...`; }, 'room_status', false);
       });
 
-      client.on('error', (err) => {
-        console.warn('MQTT sync error:', err?.message || err);
-      });
+      client.on('error', () => {});
 
-      // Gentle 20s presence heartbeat so everyone stays fresh even through mobile sleep
       this.heartbeatTimer = setInterval(() => {
         if (store.get().room.connected) this.publishLocalPlayerNow();
       }, 20000);
-    } catch (e) {
-      console.error('Cloud room connect failed:', e);
+    } catch {
       store.mutate((s) => {
         s.room.connected = true;
         s.room.statusText = `Local Tabs · ${code}`;
@@ -346,7 +393,7 @@ export class MultiplayerManager {
     const s = store.get();
     const p = store.getLocalPlayer();
     if (!p || !s.room.connected) return;
-    const payload = { ...p, lastSeen: Date.now(), online: true };
+    const payload = { ...p, lastSeen: p.lastSeen || Date.now(), online: true };
 
     if (s.room.engine === 'firebase' && s.room.firebaseUrl) {
       const roomPath = `${s.room.firebaseUrl.replace(/\/+$/, '')}/jetlag_rooms/${topicKey(s.room.code)}`;
@@ -393,6 +440,7 @@ export class MultiplayerManager {
     }
     const code = normalizeRoomCode(rawCode) || generateRoomCode();
     const roomPath = `${dbUrl}/jetlag_rooms/${topicKey(code)}`;
+    ensureQrLib();
 
     store.mutate((s) => {
       s.room.engine = 'firebase';
@@ -464,8 +512,7 @@ export class MultiplayerManager {
         s.room.statusText = `Firebase · ${code}`;
       }, 'room_status', false);
       this.callbacks.onToast?.(`Connected to Firebase room ${code}.`);
-    } catch (err) {
-      console.error('Firebase sync error:', err);
+    } catch {
       store.mutate((s) => {
         s.room.connected = false;
         s.room.statusText = 'Firebase Error (check DB rules/URL)';
@@ -481,46 +528,124 @@ export class MultiplayerManager {
       await fetch(`${roomPath}/players/${p.id}.json`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...p, lastSeen: Date.now(), online: true })
+        body: JSON.stringify({ ...p, lastSeen: p.lastSeen || Date.now(), online: true })
       });
     } catch {}
   }
 
-  // ===== LIVE GPS TRACKING =====
+  // ===== HARDENED OUTDOOR SYDNEY GPS TELEMETRY ENGINE =====
+  applyGpsPosition(coords) {
+    const { latitude, longitude, accuracy, speed, heading } = coords;
+    const now = Date.now();
+    const speedKmh = speed != null && !Number.isNaN(speed) && speed >= 0 ? Math.round(speed * 3.6) : null;
+    const quality = accuracy != null && accuracy > 80 ? 'weak' : 'live';
+
+    store.mutate((s) => {
+      const p = s.players[s.localPlayerId];
+      if (!p) return;
+      p.lat = latitude;
+      p.lng = longitude;
+      p.accuracy = accuracy != null ? Math.round(accuracy) : null;
+      p.speed = speed;
+      p.heading = heading != null && !Number.isNaN(heading) ? Math.round(heading) : p.heading;
+      p.lastSeen = now;
+      p.online = true;
+
+      if (p.gpsFrozen && s.room.freezeEndsAt && now > s.room.freezeEndsAt) {
+        p.gpsFrozen = false;
+        p.frozenLat = null;
+        p.frozenLng = null;
+      }
+
+      // Append breadcrumb trail point if moved >= 25m
+      const trail = s.gpsTelemetry.trail || [];
+      const lastPt = trail[trail.length - 1];
+      if (!lastPt || haversineM(lastPt[0], lastPt[1], latitude, longitude) >= 25) {
+        trail.push([latitude, longitude]);
+        if (trail.length > 160) trail.shift();
+      }
+      s.gpsTelemetry = {
+        status: quality,
+        accuracy: p.accuracy,
+        speedKmh,
+        heading: p.heading,
+        lastFixAt: now,
+        errorMsg: '',
+        trail
+      };
+    }, 'gps', true);
+
+    this.callbacks.onGpsUpdate?.(latitude, longitude, accuracy);
+  }
+
   startGps() {
     if (!navigator.geolocation) {
+      store.mutate((s) => {
+        s.gpsTelemetry.status = 'unavailable';
+        s.gpsTelemetry.errorMsg = 'Browser does not support Geolocation.';
+      }, 'gps', false);
       this.callbacks.onToast?.('Geolocation is not supported by this browser.');
       return;
     }
-    if (this.geoWatchId != null) return;
+    const isSecure = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+    if (!isSecure) {
+      store.mutate((s) => {
+        s.gpsTelemetry.status = 'insecure';
+        s.gpsTelemetry.errorMsg = 'Mobile browsers require HTTPS for live GPS (works automatically on GitHub Pages).';
+      }, 'gps', false);
+      this.callbacks.onToast?.('Live GPS requires HTTPS — works automatically on GitHub Pages.');
+      return;
+    }
+    if (this.geoWatchId != null) {
+      this.refreshGpsFix();
+      return;
+    }
 
-    store.mutate((s) => { s.room.shareGps = true; }, 'gps', false);
+    store.mutate((s) => {
+      s.room.shareGps = true;
+      s.gpsTelemetry.status = 'acquiring';
+      s.gpsTelemetry.errorMsg = '';
+    }, 'gps', false);
 
     this.geoWatchId = navigator.geolocation.watchPosition(
-      (pos) => {
-        const { latitude, longitude, accuracy, speed } = pos.coords;
-        store.mutate((s) => {
-          const p = s.players[s.localPlayerId];
-          if (!p) return;
-          p.lat = latitude;
-          p.lng = longitude;
-          p.accuracy = accuracy;
-          p.speed = speed;
-          p.lastSeen = Date.now();
-          p.online = true;
-          if (p.gpsFrozen && s.room.freezeEndsAt && Date.now() > s.room.freezeEndsAt) {
-            p.gpsFrozen = false;
-            p.frozenLat = null;
-            p.frozenLng = null;
-          }
-        }, 'gps', true);
-        this.callbacks.onGpsUpdate?.(latitude, longitude, accuracy);
-      },
+      (pos) => this.applyGpsPosition(pos.coords),
       (err) => {
-        console.warn('GPS error:', err);
-        this.callbacks.onToast?.(`GPS unavailable (${err.message}). Use a Demo Pin in the Live tab to test.`);
+        const denied = err.code === 1;
+        store.mutate((s) => {
+          s.gpsTelemetry.status = denied ? 'denied' : 'weak';
+          s.gpsTelemetry.errorMsg = denied
+            ? 'Location permission denied. Enable location access for this site in your phone browser settings.'
+            : `Signal weak / tunnel (${err.message}).`;
+        }, 'gps', false);
+        this.callbacks.onToast?.(denied ? 'Location permission denied in browser settings.' : `GPS signal weak: ${err.message}`);
       },
-      { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
+      { enableHighAccuracy: true, maximumAge: 4000, timeout: 15000 }
+    );
+
+    // Monitor stale GPS signal (e.g. underground in Sydney Metro / City Circle tunnels)
+    clearInterval(this.gpsStaleTimer);
+    this.gpsStaleTimer = setInterval(() => {
+      const s = store.get();
+      if (!s.room.shareGps || !s.gpsTelemetry.lastFixAt) return;
+      const ageSec = (Date.now() - s.gpsTelemetry.lastFixAt) / 1000;
+      if (ageSec > 60 && s.gpsTelemetry.status !== 'stale') {
+        store.mutate((st) => {
+          st.gpsTelemetry.status = 'stale';
+          st.gpsTelemetry.errorMsg = 'No fresh GPS fix for >60s (tunnel or background sleep).';
+        }, 'gps', false);
+      }
+    }, 10000);
+  }
+
+  refreshGpsFix(silent = false) {
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        this.applyGpsPosition(pos.coords);
+        if (!silent) this.callbacks.onToast?.(`GPS refreshed (±${Math.round(pos.coords.accuracy)}m).`);
+      },
+      () => {},
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
     );
   }
 
@@ -529,19 +654,19 @@ export class MultiplayerManager {
       navigator.geolocation.clearWatch(this.geoWatchId);
       this.geoWatchId = null;
     }
-    store.mutate((s) => { s.room.shareGps = false; }, 'gps', false);
+    clearInterval(this.gpsStaleTimer);
+    store.mutate((s) => {
+      s.room.shareGps = false;
+      s.gpsTelemetry.status = 'off';
+    }, 'gps', false);
+  }
+
+  clearGpsTrail() {
+    store.mutate((s) => { s.gpsTelemetry.trail = []; }, 'gps', false);
   }
 
   setSimulatedGps(lat, lng, label = '') {
-    store.mutate((s) => {
-      const p = s.players[s.localPlayerId];
-      if (!p) return;
-      p.lat = lat;
-      p.lng = lng;
-      p.accuracy = 15;
-      p.lastSeen = Date.now();
-      p.online = true;
-    }, 'gps', true);
+    this.applyGpsPosition({ latitude: lat, longitude: lng, accuracy: 10, speed: 0, heading: null });
     if (label) this.callbacks.onToast?.(`Demo GPS positioned at ${label}.`);
   }
 }

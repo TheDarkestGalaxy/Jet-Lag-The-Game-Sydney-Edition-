@@ -9,20 +9,19 @@
   <link rel="manifest" href="./manifest.json" />
   <link rel="icon" type="image/svg+xml" href="./assets/icon.svg" />
 
-  <!-- Fonts -->
+  <!-- Fonts & Network Preconnects -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="preconnect" href="https://unpkg.com" crossorigin />
+  <link rel="dns-prefetch" href="https://tile.openstreetmap.org" />
+  <link rel="dns-prefetch" href="https://server.arcgisonline.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@600;700;800&family=Space+Grotesk:wght@600;700;800&display=swap" rel="stylesheet" />
 
-  <!-- Leaflet 1.9.4 -->
+  <!-- Leaflet 1.9.4 (MQTT & QR libraries are lazy-loaded on demand in js/multiplayer.js for faster boot) -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 
-  <!-- Live WSS Realtime Sync (MQTT.js) & QR Generator -->
-  <script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js" crossorigin=""></script>
-  <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js" crossorigin=""></script>
-
-  <link rel="stylesheet" href="./css/styles.css?v=14" />
+  <link rel="stylesheet" href="./css/styles.css?v=15" />
   <script>
     // Clear any older Service Worker caches immediately so updates always show up right away
     if ('serviceWorker' in navigator) {
@@ -162,6 +161,7 @@
           <button class="btn btn-secondary btn-xs" id="btn-fit-sydney" style="flex:1">Greater Sydney</button>
           <button class="btn btn-secondary btn-xs" id="btn-fit-nsw" style="flex:1">Full NSW</button>
           <button class="btn btn-secondary btn-xs" id="btn-toggle-labels">Labels</button>
+          <button class="btn btn-secondary btn-xs" id="btn-toggle-trail" title="Toggle GPS Breadcrumb Trail">Trail</button>
         </div>
 
         <div class="field">
@@ -193,6 +193,9 @@
         <span id="isolated-line-text">Showing M1</span>
         <button class="btn btn-ghost btn-xs" id="btn-clear-isolated">Show All</button>
       </div>
+
+      <!-- Live GPS Nearest-Station & Signal HUD Pill (only shown when GPS has a fix) -->
+      <button class="gps-hud-pill" id="gps-hud-pill" style="display:none" title="Tap to fly to nearest Sydney station"></button>
     </section>
 
     <!-- SIDE COMMAND DRAWER (Desktop Docked / Mobile Bottom Sheet) -->
@@ -307,6 +310,6 @@
   <!-- TOAST NOTIFICATIONS -->
   <div class="toast-stack" id="toast-stack"></div>
 
-  <script type="module" src="./js/app.js?v=14"></script>
+  <script type="module" src="./js/app.js?v=15"></script>
 </body>
 </html>

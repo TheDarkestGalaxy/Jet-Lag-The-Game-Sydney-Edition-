@@ -1,7 +1,7 @@
 // Interactive Real-World Sydney Transit Map & Jet Lag Strategy Toolkit (Leaflet)
 import { SYDNEY_NETWORK } from '../data/sydney-network.js';
-import { store, uid } from './state.js?v=14';
-import { haversineM, formatDistance, canSeePlayerGps, getDividingSide, getAccess } from './modes.js?v=14';
+import { store, uid } from './state.js?v=15';
+import { haversineM, formatDistance, canSeePlayerGps, getDividingSide, getAccess, evaluateGpsProximity } from './modes.js?v=15';
 
 const BASEMAPS = {
   dark: {
@@ -144,10 +144,12 @@ export class SydneyMapController {
     this.showStationLabels = false;
 
     // Layer groups
+    this.canvasRenderer = null;
     this.linesLayer = null;
     this.stationsLayer = null;
     this.modeOverlayLayer = null;
     this.annotationsLayer = null;
+    this.trailLayer = null;
     this.playersLayer = null;
     this.stationById = new Map();
     this.lineByCode = new Map();
@@ -177,10 +179,12 @@ export class SydneyMapController {
 
     this.setBasemap(store.get().theme === 'light' ? 'light' : 'dark');
 
+    this.canvasRenderer = L.canvas({ padding: 0.5, tolerance: 8 });
     this.modeOverlayLayer = L.layerGroup().addTo(this.map);
     this.annotationsLayer = L.layerGroup().addTo(this.map);
     this.linesLayer = L.layerGroup().addTo(this.map);
     this.stationsLayer = L.layerGroup().addTo(this.map);
+    this.trailLayer = L.layerGroup().addTo(this.map);
     this.draftLayer = L.layerGroup().addTo(this.map);
     this.playersLayer = L.layerGroup().addTo(this.map);
 
@@ -196,11 +200,53 @@ export class SydneyMapController {
       }
     });
 
+    // Targeted dirty-checking: never rebuild all 394 station markers on GPS/clock/feed ticks!
     store.subscribe((state, reason) => {
       if (reason === 'theme') {
         if (state.theme === 'light' && this.currentBasemap === 'dark') this.setBasemap('light');
         if (state.theme === 'dark' && this.currentBasemap === 'light') this.setBasemap('dark');
+        return;
       }
+      if (reason === 'gps') {
+        this.renderPlayers(state);
+        this.renderGpsTrail(state);
+        return;
+      }
+      if (reason === 'trail') {
+        this.renderGpsTrail(state);
+        return;
+      }
+      if (reason === 'annotation') {
+        this.renderAnnotations(state);
+        return;
+      }
+      if (reason === 'hiding_zone' || reason === 'dividing_line' || reason === 'win_sectors' || reason === 'boundary' || reason === 'rules') {
+        this.renderModeOverlays(state);
+        this.renderPlayers(state);
+        return;
+      }
+      if (reason === 'profile') {
+        this.renderPlayers(state);
+        return;
+      }
+      if (
+        reason === 'feed' ||
+        reason === 'clock' ||
+        reason === 'qa' ||
+        reason === 'curse' ||
+        reason === 'wheel' ||
+        reason === 'chat' ||
+        reason === 'room_status' ||
+        reason === 'accent' ||
+        reason === 'sound' ||
+        reason === 'schedule' ||
+        reason === 'deck' ||
+        reason === 'powerup' ||
+        reason === 'transit_burn'
+      ) {
+        return;
+      }
+      // Full dynamic refresh for claim, flag, checkpoint, teams, mode, reset, remote, import
       this.renderAllDynamicLayers(state);
     });
   }
@@ -314,6 +360,7 @@ export class SydneyMapController {
         // Subtle dark casing behind active lines for crisp map contrast
         if (!isIsolated) {
           L.polyline(seg, {
+            renderer: this.canvasRenderer,
             color: '#070b14',
             weight: weight + 2.4,
             opacity: 0.45,
@@ -324,6 +371,7 @@ export class SydneyMapController {
         }
 
         const poly = L.polyline(seg, {
+          renderer: this.canvasRenderer,
           color: line.color,
           weight,
           opacity,
@@ -382,6 +430,7 @@ export class SydneyMapController {
           : zoom >= 14 ? 5 : 3.6;
 
       const marker = L.circleMarker([st.lat, st.lng], {
+        renderer: this.canvasRenderer,
         radius,
         fillColor: claimTeam ? claimTeam.color : st.isInterchange ? '#ffffff' : baseColor,
         color: claimTeam ? '#ffffff' : st.isInterchange ? '#0b1020' : '#0b1020',
@@ -389,23 +438,35 @@ export class SydneyMapController {
         fillOpacity: 1
       });
 
-      const pills = st.lines
-        .slice(0, 6)
-        .map((c) => {
-          const ln = this.lineByCode.get(c);
-          return `<span class="line-pill sm" style="background:${ln?.color || '#64748b'};color:${ln?.textColor || '#fff'}">${c}</span>`;
-        })
-        .join('');
+      const buildTooltipHtml = () => {
+        const pills = st.lines
+          .slice(0, 6)
+          .map((c) => {
+            const ln = this.lineByCode.get(c);
+            return `<span class="line-pill sm" style="background:${ln?.color || '#64748b'};color:${ln?.textColor || '#fff'}">${c}</span>`;
+          })
+          .join('');
+        return `<div class="tt-station"><strong>${st.name}</strong><div class="tt-pills">${pills}</div>${claimTeam ? `<div class="tt-claim" style="color:${claimTeam.color}">Claimed by ${claimTeam.name}</div>` : ''}</div>`;
+      };
 
-      marker.bindTooltip(
-        `<div class="tt-station"><strong>${st.name}</strong><div class="tt-pills">${pills}</div>${claimTeam ? `<div class="tt-claim" style="color:${claimTeam.color}">Claimed by ${claimTeam.name}</div>` : ''}</div>`,
-        {
+      const isPermanent = this.showStationLabels && (zoom >= 14 || (zoom >= 12 && st.isInterchange));
+      if (isPermanent) {
+        marker.bindTooltip(buildTooltipHtml(), {
           direction: 'top',
           offset: [0, -6],
           className: 'jl-tooltip',
-          permanent: this.showStationLabels && (zoom >= 14 || (zoom >= 12 && st.isInterchange))
-        }
-      );
+          permanent: true
+        });
+      } else {
+        // Lazy tooltip binding: only allocate tooltip DOM when user hovers a station
+        marker.once('mouseover', () => {
+          marker.bindTooltip(buildTooltipHtml(), {
+            direction: 'top',
+            offset: [0, -6],
+            className: 'jl-tooltip'
+          }).openTooltip();
+        });
+      }
 
       marker.on('click', (ev) => {
         if (this.activeTool !== 'select') return;
@@ -481,6 +542,7 @@ export class SydneyMapController {
     const isHostGm = access.isGm;
     const claimLimitM = Number(state.game.stationClaimRadiusM) || 100;
     const cpLimitM = Number(state.game.checkpointRadiusM) || 100;
+    const flagLimitM = Number(state.game.flagPickupRadiusM) || 100;
 
     if (state.game.rules.stationClaiming) {
       if (isHostGm) {
@@ -496,15 +558,12 @@ export class SydneyMapController {
         }
       } else if (myTeam) {
         const blockedBySteal = Boolean(claim && !state.game.allowStealingStations);
-        const needGps = access.mustVerifyGps && dist == null;
-        const tooFar = access.mustVerifyGps && dist != null && dist > claimLimitM;
+        const prox = evaluateGpsProximity(state, myPlayer, st.lat, st.lng, claimLimitM);
 
         if (blockedBySteal) {
           addBtn('Already Claimed (No Stealing)', 'btn-ghost', () => {}, true);
-        } else if (needGps) {
-          addBtn(`Enable Live GPS (<= ${claimLimitM}m to claim)`, 'btn-secondary', () => {}, true);
-        } else if (tooFar) {
-          addBtn(`Too far to claim (${formatDistance(dist)} / ${claimLimitM}m max)`, 'btn-secondary', () => {}, true);
+        } else if (!prox.allowed) {
+          addBtn(prox.reason, 'btn-secondary', () => {}, true);
         } else {
           addBtn(claim ? `Steal for ${myTeam.name}` : `Claim for ${myTeam.name}`, 'btn-primary', () =>
             this.callbacks.onToggleClaim?.(st, true)
@@ -523,13 +582,12 @@ export class SydneyMapController {
           addBtn(`Place ${tm.name} Flag`, 'btn-accent', () => this.callbacks.onDropFlag?.(st, tm.id));
         });
       } else if (myTeam) {
-        const flagLimitM = Number(state.game.flagPickupRadiusM) || 100;
-        const tooFarFlag = access.mustVerifyGps && (dist == null || dist > flagLimitM);
+        const proxFlag = evaluateGpsProximity(state, myPlayer, st.lat, st.lng, flagLimitM);
         addBtn(
-          tooFarFlag ? `Move <= ${flagLimitM}m to Drop Flag` : `Drop ${myTeam.name} Flag`,
-          tooFarFlag ? 'btn-secondary' : 'btn-accent',
+          !proxFlag.allowed ? proxFlag.reason : `Drop ${myTeam.name} Flag`,
+          !proxFlag.allowed ? 'btn-secondary' : 'btn-accent',
           () => this.callbacks.onDropFlag?.(st),
-          tooFarFlag
+          !proxFlag.allowed
         );
       }
     }
@@ -537,13 +595,12 @@ export class SydneyMapController {
     if (state.game.rules.checkpoints) {
       const existingCp = state.checkpoints.find((c) => c.stationId === st.id);
       if (existingCp && !isHostGm) {
-        const needGpsCp = access.mustVerifyGps && dist == null;
-        const tooFarCp = access.mustVerifyGps && dist != null && dist > cpLimitM;
+        const proxCp = evaluateGpsProximity(state, myPlayer, st.lat, st.lng, cpLimitM);
         addBtn(
-          needGpsCp ? `Enable GPS (<= ${cpLimitM}m)` : tooFarCp ? `Move <= ${cpLimitM}m (${formatDistance(dist)})` : 'Check Off Checkpoint',
-          needGpsCp || tooFarCp ? 'btn-secondary' : 'btn-primary',
+          !proxCp.allowed ? proxCp.reason : 'Check Off Checkpoint',
+          !proxCp.allowed ? 'btn-secondary' : 'btn-primary',
           () => this.callbacks.onCheckCheckpoint?.(existingCp.id),
-          needGpsCp || tooFarCp
+          !proxCp.allowed
         );
       } else if (!existingCp && access.canEditRules) {
         addBtn('+ Add Checkpoint', 'btn-secondary', () => this.callbacks.onAddCheckpoint?.(st));
@@ -568,13 +625,58 @@ export class SydneyMapController {
     this.renderStations();
     this.renderModeOverlays(state);
     this.renderAnnotations(state);
+    this.renderGpsTrail(state);
     this.renderPlayers(state);
+  }
+
+  renderGpsTrail(state) {
+    if (!this.trailLayer) return;
+    this.trailLayer.clearLayers();
+    if (!state.showGpsTrail) return;
+    const pts = state.gpsTelemetry?.trail || [];
+    if (pts.length < 2) return;
+    const myTeam = store.getLocalTeam();
+    const col = myTeam?.color || '#38bdf8';
+    L.polyline(pts, {
+      renderer: this.canvasRenderer,
+      color: col,
+      weight: 3.5,
+      opacity: 0.82,
+      dashArray: '2 6',
+      lineCap: 'round',
+      interactive: false
+    }).addTo(this.trailLayer);
   }
 
   renderModeOverlays(state) {
     this.modeOverlayLayer.clearLayers();
     const myTeam = store.getLocalTeam();
     const isHostGm = Boolean(store.getLocalPlayer()?.isEventHost);
+
+    // 0. Optional Play Area Boundary (Inverted mask dimming out-of-bounds areas)
+    const pb = state.game?.playBoundary;
+    if (pb?.enabled && pb.center && pb.radiusKm > 0) {
+      const ring = circleRing(pb.center[0], pb.center[1], pb.radiusKm * 1000, 96);
+      L.polygon([WORLD_OUTER_RING, ring], {
+        renderer: this.canvasRenderer,
+        color: '#f59e0b',
+        weight: 2.5,
+        dashArray: '10 6',
+        fillColor: '#040712',
+        fillOpacity: 0.42,
+        interactive: false
+      }).addTo(this.modeOverlayLayer);
+
+      L.circleMarker(pb.center, {
+        renderer: this.canvasRenderer,
+        radius: 4,
+        fillColor: '#f59e0b',
+        color: '#fff',
+        weight: 1.5
+      })
+        .bindTooltip(`Play Area Center: ${pb.centerName || 'Custom'} (${pb.radiusKm} km radius)`, { className: 'jl-tooltip' })
+        .addTo(this.modeOverlayLayer);
+    }
 
     // 1. Hide + Seek Hiding Zone (always visible to Event Host GM!)
     if (state.game.rules.hideSeekQA && state.hidingZone && (isHostGm || state.hidingZone.revealed || state.hidingZone.setByTeamId === myTeam?.id)) {
@@ -894,12 +996,14 @@ export class SydneyMapController {
       });
 
       const ageSec = Math.max(0, Math.round((Date.now() - (p.lastSeen || Date.now())) / 1000));
+      const spdKmh = p.speed != null && !Number.isNaN(p.speed) && p.speed > 0.5 ? Math.round(p.speed * 3.6) : null;
       L.marker([lat, lng], { icon, zIndexOffset: isMe ? 1000 : 800 })
         .bindPopup(
           `<div class="station-popup">
             <h4>${p.name} ${isMe ? '(You)' : ''}</h4>
             <p>Team: <strong style="color:${col}">${team?.name || 'None'}</strong> ${roleTag ? `(${roleTag})` : ''}</p>
             ${sideText ? `<p>Zone: <strong>${sideText}</strong></p>` : ''}
+            ${spdKmh ? `<p>Moving: <strong>${spdKmh} km/h</strong>${p.accuracy ? ` · ±${p.accuracy}m` : ''}</p>` : (p.accuracy ? `<p>GPS Accuracy: <strong>±${p.accuracy}m</strong></p>` : '')}
             <p class="sp-meta">Updated ${ageSec < 5 ? 'just now' : `${ageSec}s ago`}${p.gpsFrozen ? ' · Tracker Frozen' : ''}</p>
           </div>`,
           { className: 'jl-popup' }
@@ -935,6 +1039,10 @@ export class SydneyMapController {
           : `Zone Shader: ${this.draftPoints.length} vertices placed. Double-click or press Finish to shade!`;
       case 'pin':
         return 'Pin Tool: Tap anywhere on the map to drop a labeled tactical marker.';
+      case 'ctf_border':
+        return this.draftPoints.length === 0
+          ? 'Custom CTF Border: Tap Point 1 on the map to start your dividing line.'
+          : 'Custom CTF Border: Tap Point 2 to set the new Capture the Flag dividing line!';
       default:
         return '';
     }
@@ -951,6 +1059,21 @@ export class SydneyMapController {
 
     if (this.activeTool === 'pin') {
       this.callbacks.onRequestPin?.(lat, lng);
+      return;
+    }
+
+    if (this.activeTool === 'ctf_border') {
+      this.draftPoints.push([lat, lng]);
+      this.renderDraft();
+      if (this.draftPoints.length === 2) {
+        const [p1, p2] = this.draftPoints;
+        this.draftPoints = [];
+        this.draftLayer.clearLayers();
+        this.setTool('select');
+        this.callbacks.onCustomBorderDrawn?.(p1, p2);
+      } else {
+        this.callbacks.onToolStatus?.(this.getToolHint());
+      }
       return;
     }
 

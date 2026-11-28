@@ -32,13 +32,16 @@ A mobile-first, real-world transit game companion built for **Jet Lag: The Game*
 
 ---
 
-## Deploying to GitHub Pages (2 Minutes)
+## Deploying & Updating on GitHub Pages
 
-1. Create a new GitHub repository (e.g. `jet-lag-sydney`).
-2. Upload/push all files from this folder to the `main` branch.
+1. Create a GitHub repository (e.g. `jet-lag-sydney`).
+2. **Important when uploading via the GitHub website (`Add file → Upload files`)**:
+   - **Do NOT drag the outer `Jet Lag The Game Sydney Edition` folder** onto GitHub — that creates a nested subfolder (`Jet Lag The Game Sydney Edition/js/...`) that GitHub Pages will ignore while serving your old root `js/` and `css/` files!
+   - Instead, **open** the `Jet Lag The Game Sydney Edition` folder on your PC, press **`Ctrl + A`** to select everything *inside* it (`index.html`, `sw.js`, `manifest.json`, `css/`, `js/`, `data/`, `assets/`), and drag **those selected items** straight into the root of your repository.
+   - If you accidentally have a `Jet Lag The Game Sydney Edition` folder inside your repo, delete it so only the root files/folders exist.
 3. In GitHub, open **Settings → Pages**.
 4. Under **Build and deployment**, set **Source** to `Deploy from a branch`, select `main` and `/ (root)`, then click **Save**.
-5. After ~30 seconds your site will be live at `https://<your-username>.github.io/jet-lag-sydney/`!
+5. After ~30–60 seconds your site will be live at `https://<your-username>.github.io/<repo-name>/`! Check the version badge (`v15`) at the bottom of **Live → Preferences & Backup** to verify your update went live.
 
 ---
 
